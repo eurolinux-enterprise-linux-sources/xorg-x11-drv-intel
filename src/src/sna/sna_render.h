@@ -44,7 +44,7 @@ struct sna_composite_op {
 	uint32_t op;
 
 	struct {
-		PixmapPtr pixmap;
+		PixmapPtr pixmap; /* XXX */
 		CARD32 format;
 		struct kgem_bo *bo;
 		int16_t x, y;
@@ -238,8 +238,9 @@ struct sna_render {
 			  int16_t w, int16_t h,
 			  unsigned flags,
 			  struct sna_composite_op *tmp);
-#define COMPOSITE_PARTIAL 0x1
-#define COMPOSITE_FALLBACK 0x80000000
+#define COMPOSITE_PARTIAL	0x1
+#define COMPOSITE_UPLOAD	0x40000000
+#define COMPOSITE_FALLBACK	0x80000000
 
 	bool (*check_composite_spans)(struct sna *sna, uint8_t op,
 				      PicturePtr dst, PicturePtr src,
@@ -264,7 +265,7 @@ struct sna_render {
 			   CARD8 op,
 			   PictFormat format,
 			   const xRenderColor *color,
-			   PixmapPtr dst, struct kgem_bo *dst_bo,
+			   const DrawableRec *dst, struct kgem_bo *dst_bo,
 			   const BoxRec *box, int n);
 	bool (*fill)(struct sna *sna, uint8_t alu,
 		     PixmapPtr dst, struct kgem_bo *dst_bo,
@@ -280,11 +281,14 @@ struct sna_render {
 	bool (*clear)(struct sna *sna, PixmapPtr dst, struct kgem_bo *dst_bo);
 
 	bool (*copy_boxes)(struct sna *sna, uint8_t alu,
-			   PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-			   PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+			   const DrawableRec *src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+			   const DrawableRec *dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 			   const BoxRec *box, int n, unsigned flags);
 #define COPY_LAST 0x1
 #define COPY_SYNC 0x2
+#define COPY_NO_OVERLAP 0x4
+#define COPY_SMALL 0x8
+#define COPY_DRI 0x10
 
 	bool (*copy)(struct sna *sna, uint8_t alu,
 		     PixmapPtr src, struct kgem_bo *src_bo,
@@ -326,9 +330,6 @@ struct sna_render {
 	} glyph[2];
 	pixman_image_t *white_image;
 	PicturePtr white_picture;
-#if HAS_PIXMAN_GLYPHS
-	pixman_glyph_cache_t *glyph_cache;
-#endif
 
 	uint16_t vb_id;
 	uint16_t vertex_offset;
@@ -510,6 +511,7 @@ struct gen7_render_state {
 	uint16_t last_primitive;
 	int16_t floats_per_vertex;
 	uint16_t surface_table;
+	uint16_t pipe_controls_since_stall;
 
 	bool needs_invariant;
 	bool emit_flush;
@@ -539,7 +541,7 @@ enum {
 
 struct gen8_render_state {
 	unsigned gt;
-
+	const struct gt_info *info;
 	struct kgem_bo *general_bo;
 
 	uint32_t vs_state;
@@ -622,6 +624,8 @@ const char *gen6_render_init(struct sna *sna, const char *backend);
 const char *gen7_render_init(struct sna *sna, const char *backend);
 const char *gen8_render_init(struct sna *sna, const char *backend);
 
+void sna_render_mark_wedged(struct sna *sna);
+
 bool sna_tiling_composite(uint32_t op,
 			  PicturePtr src,
 			  PicturePtr mask,
@@ -643,12 +647,12 @@ bool sna_tiling_fill_boxes(struct sna *sna,
 			   CARD8 op,
 			   PictFormat format,
 			   const xRenderColor *color,
-			   PixmapPtr dst, struct kgem_bo *dst_bo,
+			   const DrawableRec *dst, struct kgem_bo *dst_bo,
 			   const BoxRec *box, int n);
 
 bool sna_tiling_copy_boxes(struct sna *sna, uint8_t alu,
-			   PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-			   PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+			   const DrawableRec *src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+			   const DrawableRec *dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 			   const BoxRec *box, int n);
 
 bool sna_tiling_blt_copy_boxes(struct sna *sna, uint8_t alu,
@@ -705,9 +709,14 @@ bool sna_blt_copy_boxes__with_alpha(struct sna *sna, uint8_t alu,
 				    int bpp, int alpha_fixup,
 				    const BoxRec *box, int nbox);
 bool sna_blt_copy_boxes_fallback(struct sna *sna, uint8_t alu,
-				 PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-				 PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+				 const DrawableRec *src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+				 const DrawableRec *dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 				 const BoxRec *box, int nbox);
+
+bool memcpy_copy_boxes(struct sna *sna, uint8_t op,
+		       const DrawableRec *src_draw, struct kgem_bo *src_bo, int16_t sx, int16_t sy,
+		       const DrawableRec *dst_draw, struct kgem_bo *dst_bo, int16_t dx, int16_t dy,
+		       const BoxRec *box, int n, unsigned flags);
 
 bool _sna_get_pixel_from_rgba(uint32_t *pixel,
 			     uint16_t red,
@@ -758,7 +767,7 @@ sna_render_pixmap_bo(struct sna *sna,
 
 bool
 sna_render_pixmap_partial(struct sna *sna,
-			  PixmapPtr pixmap,
+			  const DrawableRec *draw,
 			  struct kgem_bo *bo,
 			  struct sna_composite_channel *channel,
 			  int16_t x, int16_t y,
@@ -817,8 +826,9 @@ sna_render_composite_redirect_done(struct sna *sna,
 
 bool
 sna_render_copy_boxes__overlap(struct sna *sna, uint8_t alu,
-			       PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-			       PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+			       const DrawableRec *draw, struct kgem_bo *bo,
+			       int16_t src_dx, int16_t src_dy,
+			       int16_t dst_dx, int16_t dst_dy,
 			       const BoxRec *box, int n, const BoxRec *extents);
 
 bool

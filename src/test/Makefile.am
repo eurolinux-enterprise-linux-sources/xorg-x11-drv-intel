@@ -5,13 +5,18 @@ stress_TESTS = \
 	basic-rectangle \
 	basic-string \
 	basic-copyarea \
+	basic-copyplane \
 	basic-copyarea-size \
 	basic-putimage \
 	basic-lines \
 	basic-stress \
+	DrawSegments \
+	cursor-test \
 	render-fill \
+	render-glyphs \
 	render-trapezoid \
 	render-trapezoid-image \
+	render-triangle \
 	render-fill-copy \
 	render-composite-solid \
 	render-composite-solid-mask \
@@ -20,16 +25,25 @@ stress_TESTS = \
 	render-copyarea-size \
 	render-copy-alphaless \
 	mixed-stress \
+	shm-test \
 	$(NULL)
 
 if DRI2
 stress_TESTS += \
 	dri2-race \
+	dri2-speed \
 	dri2-swap \
 	dri2-test \
 	$(NULL)
 endif
 
+if X11_DRI3
+stress_TESTS += \
+	dri3-test \
+	present-test \
+	present-speed \
+	$(NULL)
+endif
 check_PROGRAMS = $(stress_TESTS)
 
 noinst_PROGRAMS = lowlevel-blt-bench
@@ -51,6 +65,15 @@ libtest_la_SOURCES += \
 	dri2.c \
 	dri2.h \
 	$(NULL)
+endif
+
+if X11_DRI3
+libtest_la_SOURCES += \
+	dri3.c \
+	dri3.h \
+	$(NULL)
+AM_CFLAGS += $(X11_DRI3_CFLAGS)
+LDADD += $(X11_DRI3_LIBS)
 endif
 
 vsync.avi: mkvsync.sh

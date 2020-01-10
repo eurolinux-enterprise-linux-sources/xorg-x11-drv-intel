@@ -1,0 +1,57 @@
+From: Lyude <cpaul@redhat.com>
+Subject: [RHEL6.8 PATCH] uxa: Restore old bo on intel_uxa_set_pixmap_bo()
+ failure
+
+When we fail to create and set a new bo, we need to make sure that we restore
+the previous bo in the event that it's changed. Otherwise we'll crash the X
+server the next time we do a pageflip.
+
+Fixes bz#1318352
+Signed-off-by: Lyude Paul <cpaul@redhat.com>
+---
+So as it turns out, panning at 5200x3200 on UXA was never actually supposed to
+work. A 5200x3200 framebuffer exceeds the max bo size that we have to work with
+using UXA (which is significantly smaller then the one for SNA), and using such
+a large bo introduces the risk of various GPU operations failing. Since this
+means we can't really support this kind of panning on UXA, this patch does the
+next best thing: stop the X server from exploding when it fails to allocate a bo
+for panning due to these size limitations.
+
+ src/uxa/intel_uxa.c | 6 +++++-
+ 1 file changed, 5 insertions(+), 1 deletion(-)
+
+diff --git a/src/uxa/intel_uxa.c b/src/uxa/intel_uxa.c
+index 590ff5d..830f094 100644
+--- a/src/uxa/intel_uxa.c
++++ b/src/uxa/intel_uxa.c
+@@ -1068,7 +1068,7 @@ Bool intel_uxa_create_screen_resources(ScreenPtr screen)
+ 	ScrnInfoPtr scrn = xf86ScreenToScrn(screen);
+ 	PixmapPtr pixmap;
+ 	intel_screen_private *intel = intel_get_screen_private(scrn);
+-	dri_bo *bo = intel->front_buffer;
++	dri_bo *bo = intel->front_buffer, *old_bo;
+ 	int old_width, old_height, old_pitch;
+ 
+ 	if (!uxa_resources_init(screen))
+@@ -1081,6 +1081,7 @@ Bool intel_uxa_create_screen_resources(ScreenPtr screen)
+ 	old_width = pixmap->drawable.width;
+ 	old_height = pixmap->drawable.height;
+ 	old_pitch = pixmap->devKind;
++	old_bo = intel_uxa_get_pixmap_bo(pixmap);
+ 
+ 	if (!screen->ModifyPixmapHeader(pixmap,
+ 					scrn->virtualX,
+@@ -1102,6 +1103,9 @@ Bool intel_uxa_create_screen_resources(ScreenPtr screen)
+ err:
+ 	screen->ModifyPixmapHeader(pixmap,
+ 				   old_width, old_height, -1, -1, old_pitch, NULL);
++	if (old_bo)
++		intel_uxa_set_pixmap_bo(pixmap, old_bo);
++
+ 	return FALSE;
+ }
+ 
+-- 
+2.5.5
+
+

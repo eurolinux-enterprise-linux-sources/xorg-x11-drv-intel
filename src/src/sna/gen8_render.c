@@ -193,10 +193,6 @@ static const struct blendinfo {
 #define FILL_FLAGS(op, format) GEN8_SET_FLAGS(FILL_SAMPLER, gen8_get_blend((op), false, (format)), GEN8_WM_KERNEL_NOMASK, FILL_VERTEX)
 #define FILL_FLAGS_NOBLEND GEN8_SET_FLAGS(FILL_SAMPLER, NO_BLEND, GEN8_WM_KERNEL_NOMASK, FILL_VERTEX)
 
-#define VIDEO_SAMPLER \
-	SAMPLER_OFFSET(SAMPLER_FILTER_BILINEAR, SAMPLER_EXTEND_PAD, \
-		       SAMPLER_FILTER_NEAREST, SAMPLER_EXTEND_NONE)
-
 #define GEN8_SAMPLER(f) (((f) >> 20) & 0xfff)
 #define GEN8_BLEND(f) (((f) >> 4) & 0x7ff)
 #define GEN8_READS_DST(f) (((f) >> 15) & 1)
@@ -209,9 +205,70 @@ static const struct blendinfo {
 #define OUT_VERTEX(x,y) vertex_emit_2s(sna, x,y)
 #define OUT_VERTEX_F(v) vertex_emit(sna, v)
 
+struct gt_info {
+	const char *name;
+	struct {
+		int max_vs_entries;
+	} urb;
+};
+
+static const struct gt_info bdw_gt_info = {
+	.name = "Broadwell (gen8)",
+	.urb = { .max_vs_entries = 960 },
+};
+
+static bool is_bdw(struct sna *sna)
+{
+	return sna->kgem.gen == 0100;
+}
+
+static const struct gt_info chv_gt_info = {
+	.name = "Cherryview (gen8)",
+	.urb = { .max_vs_entries = 640 },
+};
+
+static bool is_chv(struct sna *sna)
+{
+	return sna->kgem.gen == 0101;
+}
+
 static inline bool too_large(int width, int height)
 {
 	return width > GEN8_MAX_SIZE || height > GEN8_MAX_SIZE;
+}
+
+static inline bool unaligned(struct kgem_bo *bo, int bpp)
+{
+	/* XXX What exactly do we need to meet H_ALIGN and V_ALIGN? */
+#if 0
+	int x, y;
+
+	if (bo->proxy == NULL)
+		return false;
+
+	/* Assume that all tiled proxies are constructed correctly. */
+	if (bo->tiling)
+		return false;
+
+	DBG(("%s: checking alignment of a linear proxy, offset=%d, pitch=%d, bpp=%d: => (%d, %d)\n",
+	     __FUNCTION__, bo->delta, bo->pitch, bpp,
+	     8 * (bo->delta % bo->pitch) / bpp, bo->delta / bo->pitch));
+
+	/* This may be a random userptr map, check that it meets the
+	 * render alignment of SURFACE_VALIGN_4 | SURFACE_HALIGN_4.
+	 */
+	y = bo->delta / bo->pitch;
+	if (y & 3)
+		return true;
+
+	x = 8 * (bo->delta - y * bo->pitch);
+	if (x & (4*bpp - 1))
+	    return true;
+
+	return false;
+#else
+	return false;
+#endif
 }
 
 static uint32_t gen8_get_blend(int op,
@@ -407,31 +464,46 @@ gen8_choose_composite_kernel(int op, bool has_mask, bool is_ca, bool is_affine)
 }
 
 static void
-gen8_emit_urb(struct sna *sna)
+gen8_emit_push_constants(struct sna *sna)
 {
 #if SIM
-	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_PS | (2 - 2));
-	OUT_BATCH(0 << PUSH_CONSTANT_BUFFER_OFFSET_SHIFT |
-		  4 << PUSH_CONSTANT_BUFFER_SIZE_SHIFT); /* 8KiB */
-#endif
+	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_VS | (2 - 2));
+	OUT_BATCH(0);
 
+	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_HS | (2 - 2));
+	OUT_BATCH(0);
+
+	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_DS | (2 - 2));
+	OUT_BATCH(0);
+
+	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_GS | (2 - 2));
+	OUT_BATCH(0);
+
+	OUT_BATCH(GEN8_3DSTATE_PUSH_CONSTANT_ALLOC_PS | (2 - 2));
+	OUT_BATCH(0);
+#endif
+}
+
+static void
+gen8_emit_urb(struct sna *sna)
+{
 	/* num of VS entries must be divisible by 8 if size < 9 */
 	OUT_BATCH(GEN8_3DSTATE_URB_VS | (2 - 2));
-	OUT_BATCH(960 << URB_ENTRY_NUMBER_SHIFT |
+	OUT_BATCH(sna->render_state.gen8.info->urb.max_vs_entries << URB_ENTRY_NUMBER_SHIFT |
 		  (2 - 1) << URB_ENTRY_SIZE_SHIFT |
-		  1 << URB_STARTING_ADDRESS_SHIFT);
+		  4 << URB_STARTING_ADDRESS_SHIFT);
 
 	OUT_BATCH(GEN8_3DSTATE_URB_HS | (2 - 2));
 	OUT_BATCH(0 << URB_ENTRY_SIZE_SHIFT |
-		  0 << URB_STARTING_ADDRESS_SHIFT);
+		  4 << URB_STARTING_ADDRESS_SHIFT);
 
 	OUT_BATCH(GEN8_3DSTATE_URB_DS | (2 - 2));
 	OUT_BATCH(0 << URB_ENTRY_SIZE_SHIFT |
-		  0 << URB_STARTING_ADDRESS_SHIFT);
+		  4 << URB_STARTING_ADDRESS_SHIFT);
 
 	OUT_BATCH(GEN8_3DSTATE_URB_GS | (2 - 2));
 	OUT_BATCH(0 << URB_ENTRY_SIZE_SHIFT |
-		  0 << URB_STARTING_ADDRESS_SHIFT);
+		  4 << URB_STARTING_ADDRESS_SHIFT);
 }
 
 static void
@@ -474,7 +546,7 @@ gen8_emit_vs_invariant(struct sna *sna)
 	OUT_BATCH(GEN8_3DSTATE_VS | (9 - 2));
 	OUT_BATCH64(0); /* no VS kernel */
 	OUT_BATCH(0);
-	OUT_BATCH64(0);
+	OUT_BATCH64(0); /* scratch */
 	OUT_BATCH(0);
 	OUT_BATCH(1 << 1); /* pass-through */
 	OUT_BATCH(1 << 16 | 1 << 21); /* urb write to SBE */
@@ -500,12 +572,10 @@ static void
 gen8_emit_hs_invariant(struct sna *sna)
 {
 	OUT_BATCH(GEN8_3DSTATE_HS | (9 - 2));
-	OUT_BATCH(0); /* no HS kernel */
 	OUT_BATCH(0);
 	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
+	OUT_BATCH64(0); /* no HS kernel */
+	OUT_BATCH64(0); /* scratch */
 	OUT_BATCH(0);
 	OUT_BATCH(0); /* pass-through */
 
@@ -541,11 +611,9 @@ static void
 gen8_emit_ds_invariant(struct sna *sna)
 {
 	OUT_BATCH(GEN8_3DSTATE_DS | (9 - 2));
+	OUT_BATCH64(0); /* no kernel */
 	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
+	OUT_BATCH64(0); /* scratch */
 	OUT_BATCH(0);
 	OUT_BATCH(0);
 	OUT_BATCH(0);
@@ -573,15 +641,13 @@ static void
 gen8_emit_gs_invariant(struct sna *sna)
 {
 	OUT_BATCH(GEN8_3DSTATE_GS | (10 - 2));
-	OUT_BATCH(0); /* no GS kernel */
+	OUT_BATCH64(0); /* no GS kernel */
 	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
+	OUT_BATCH64(0); /* scratch */
 	OUT_BATCH(0);
 	OUT_BATCH(0); /* pass-through */
+	OUT_BATCH(0);
+	OUT_BATCH(0);
 
 #if SIM
 	OUT_BATCH(GEN8_3DSTATE_CONSTANT_GS | (11 - 2));
@@ -640,8 +706,13 @@ static void
 gen8_emit_null_depth_buffer(struct sna *sna)
 {
 	OUT_BATCH(GEN8_3DSTATE_DEPTH_BUFFER | (8 - 2));
+#if 0
 	OUT_BATCH(SURFACE_NULL << DEPTH_BUFFER_TYPE_SHIFT |
 		  DEPTHFORMAT_D32_FLOAT << DEPTH_BUFFER_FORMAT_SHIFT);
+#else
+	OUT_BATCH(SURFACE_2D << DEPTH_BUFFER_TYPE_SHIFT |
+		  DEPTHFORMAT_D16_UNORM << DEPTH_BUFFER_FORMAT_SHIFT);
+#endif
 	OUT_BATCH64(0);
 	OUT_BATCH(0);
 	OUT_BATCH(0);
@@ -690,13 +761,15 @@ gen8_emit_wm_invariant(struct sna *sna)
 	OUT_BATCH(WM_PERSPECTIVE_PIXEL_BARYCENTRIC);
 
 #if SIM
+	OUT_BATCH(GEN8_3DSTATE_WM_CHROMAKEY | (2 - 2));
+	OUT_BATCH(0);
+#endif
+
+#if 0
 	OUT_BATCH(GEN8_3DSTATE_WM_HZ_OP | (5 - 2));
 	OUT_BATCH(0);
 	OUT_BATCH(0);
 	OUT_BATCH(0);
-	OUT_BATCH(0);
-
-	OUT_BATCH(GEN8_3DSTATE_WM_CHROMAKEY | (2 - 2));
 	OUT_BATCH(0);
 #endif
 
@@ -742,6 +815,8 @@ gen8_emit_cc_invariant(struct sna *sna)
 static void
 gen8_emit_vf_invariant(struct sna *sna)
 {
+	int n;
+
 #if 1
 	OUT_BATCH(GEN8_3DSTATE_VF | (2 - 2));
 	OUT_BATCH(0);
@@ -754,12 +829,23 @@ gen8_emit_vf_invariant(struct sna *sna)
 	OUT_BATCH(RECTLIST);
 
 	OUT_BATCH(GEN8_3DSTATE_VF_STATISTICS | 0);
+
+	for (n = 1; n <= 3; n++) {
+		OUT_BATCH(GEN8_3DSTATE_VF_INSTANCING | (3 - 2));
+		OUT_BATCH(n);
+		OUT_BATCH(0);
+	}
 }
 
 static void
 gen8_emit_invariant(struct sna *sna)
 {
 	OUT_BATCH(GEN8_PIPELINE_SELECT | PIPELINE_SELECT_3D);
+
+#if SIM
+	OUT_BATCH(GEN8_STATE_SIP | (3 - 2));
+	OUT_BATCH64(0);
+#endif
 
 	OUT_BATCH(GEN8_3DSTATE_MULTISAMPLE | (2 - 2));
 	OUT_BATCH(MULTISAMPLE_PIXEL_LOCATION_CENTER |
@@ -769,11 +855,7 @@ gen8_emit_invariant(struct sna *sna)
 	OUT_BATCH(1);
 
 #if SIM
-	OUT_BATCH(GEN8_3DSTATE_SAMPLE_PATTERN | (9 - 2));
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
-	OUT_BATCH(0);
+	OUT_BATCH(GEN8_3DSTATE_SAMPLE_PATTERN | (5 - 2));
 	OUT_BATCH(0);
 	OUT_BATCH(0);
 	OUT_BATCH(0);
@@ -781,6 +863,7 @@ gen8_emit_invariant(struct sna *sna)
 	OUT_BATCH(0);
 #endif
 
+	gen8_emit_push_constants(sna);
 	gen8_emit_urb(sna);
 
 	gen8_emit_state_base_address(sna);
@@ -817,7 +900,7 @@ gen8_emit_cc(struct sna *sna, uint32_t blend)
 	assert(blend / GEN8_BLENDFACTOR_COUNT > 0);
 	assert(blend % GEN8_BLENDFACTOR_COUNT > 0);
 
-	/* XXX can have upto 8 blend states preload, selectable via
+	/* XXX can have up to 8 blend states preload, selectable via
 	 * Render Target Index. What other side-effects of Render Target Index?
 	 */
 
@@ -834,6 +917,7 @@ gen8_emit_cc(struct sna *sna, uint32_t blend)
 	} else
 		OUT_BATCH(PS_BLEND_HAS_WRITEABLE_RT);
 
+	assert(is_aligned(render->cc_blend + blend * GEN8_BLEND_STATE_PADDED_SIZE, 64));
 	OUT_BATCH(GEN8_3DSTATE_BLEND_STATE_POINTERS | (2 - 2));
 	OUT_BATCH((render->cc_blend + blend * GEN8_BLEND_STATE_PADDED_SIZE) | 1);
 
@@ -873,6 +957,8 @@ gen8_emit_sf(struct sna *sna, bool has_mask)
 
 	OUT_BATCH(GEN8_3DSTATE_SBE | (4 - 2));
 	OUT_BATCH(num_sf_outputs << SBE_NUM_OUTPUTS_SHIFT |
+		  SBE_FORCE_VERTEX_URB_READ_LENGTH | /* forced is faster */
+		  SBE_FORCE_VERTEX_URB_READ_OFFSET |
 		  1 << SBE_URB_ENTRY_READ_LENGTH_SHIFT |
 		  1 << SBE_URB_ENTRY_READ_OFFSET_SHIFT);
 	OUT_BATCH(0);
@@ -896,11 +982,14 @@ gen8_emit_wm(struct sna *sna, int kernel)
 	     wm_kernels[kernel].name,
 	     wm_kernels[kernel].num_surfaces,
 	     kernels[0], kernels[1], kernels[2]));
+	assert(is_aligned(kernels[0], 64));
+	assert(is_aligned(kernels[1], 64));
+	assert(is_aligned(kernels[2], 64));
 
 	OUT_BATCH(GEN8_3DSTATE_PS | (12 - 2));
 	OUT_BATCH64(kernels[0] ?: kernels[1] ?: kernels[2]);
 	OUT_BATCH(1 << PS_SAMPLER_COUNT_SHIFT |
-		  //PS_VECTOR_MASK_ENABLE |
+		  PS_VECTOR_MASK_ENABLE |
 		  wm_kernels[kernel].num_surfaces << PS_BINDING_TABLE_ENTRY_COUNT_SHIFT);
 	OUT_BATCH64(0); /* scratch address */
 	OUT_BATCH(PS_MAX_THREADS |
@@ -936,7 +1025,7 @@ gen8_emit_drawing_rectangle(struct sna *sna,
 	uint32_t limit = (op->dst.height - 1) << 16 | (op->dst.width - 1);
 	uint32_t offset = (uint16_t)op->dst.y << 16 | (uint16_t)op->dst.x;
 
-	assert(!too_large(op->dst.x, op->dst.y));
+	assert(!too_large(abs(op->dst.x), abs(op->dst.y)));
 	assert(!too_large(op->dst.width, op->dst.height));
 
 	if (sna->render_state.gen8.drawrect_limit == limit &&
@@ -1185,8 +1274,8 @@ static bool gen8_magic_ca_pass(struct sna *sna,
 						  true, true,
 						  op->is_affine));
 
-	OUT_BATCH(GEN8_3DPRIMITIVE | (7- 2));
-	OUT_BATCH(RECTLIST); /* ignored, see VF_TOPOLOGY */
+	OUT_BATCH(GEN8_3DPRIMITIVE | (7 - 2));
+	OUT_BATCH(0); /* ignored, see VF_TOPOLOGY */
 	OUT_BATCH(sna->render.vertex_index - sna->render.vertex_start);
 	OUT_BATCH(sna->render.vertex_start);
 	OUT_BATCH(1);	/* single instance */
@@ -1325,7 +1414,7 @@ gen8_bind_bo(struct sna *sna,
 		domains = I915_GEM_DOMAIN_RENDER << 16 |I915_GEM_DOMAIN_RENDER;
 	} else
 		domains = I915_GEM_DOMAIN_SAMPLER << 16;
-	ss[1] = bo->io ? 0 : is_scanout ? (MOCS_WT | MOCS_ALL_CACHES) << 24 : (MOCS_WB | MOCS_ALL_CACHES) << 24;
+	ss[1] = (is_dst && is_uncached(sna, bo)) ? 0 : is_scanout ? (MOCS_WT | MOCS_ALL_CACHES) << 24 : (MOCS_WB | MOCS_ALL_CACHES) << 24;
 	ss[2] = ((width - 1)  << SURFACE_WIDTH_SHIFT |
 		 (height - 1) << SURFACE_HEIGHT_SHIFT);
 	ss[3] = (bo->pitch - 1) << SURFACE_PITCH_SHIFT;
@@ -1343,8 +1432,8 @@ gen8_bind_bo(struct sna *sna,
 
 	kgem_bo_set_binding(bo, format | is_dst << 30 | is_scanout << 31, offset);
 
-	DBG(("[%x] bind bo(handle=%d, addr=%d), format=%d, width=%d, height=%d, pitch=%d, tiling=%d -> %s\n",
-	     offset, bo->handle, ss[1],
+	DBG(("[%x] bind bo(handle=%d, addr=%lx), format=%d, width=%d, height=%d, pitch=%d, tiling=%d -> %s\n",
+	     offset, bo->handle, *(uint64_t *)(ss+8),
 	     format, width, height, bo->pitch, bo->tiling,
 	     domains & 0xffff ? "render" : "sampler"));
 
@@ -1363,10 +1452,6 @@ static void gen8_emit_vertex_buffer(struct sna *sna,
 	OUT_BATCH64(0);
 	OUT_BATCH(~0); /* buffer size: disabled */
 
-	OUT_BATCH(GEN8_3DSTATE_VF_INSTANCING | (3 - 2));
-	OUT_BATCH(id);
-	OUT_BATCH(0);
-
 	sna->render.vb_id |= 1 << id;
 }
 
@@ -1378,7 +1463,7 @@ static void gen8_emit_primitive(struct sna *sna)
 	}
 
 	OUT_BATCH(GEN8_3DPRIMITIVE | (7 - 2));
-	OUT_BATCH(RECTLIST); /* ignored, see VF_TOPOLOGY */
+	OUT_BATCH(0); /* ignored, see VF_TOPOLOGY */
 	sna->render.vertex_offset = sna->kgem.nbatch;
 	OUT_BATCH(0);	/* vertex count, to be filled in later */
 	OUT_BATCH(sna->render.vertex_index);
@@ -1719,6 +1804,7 @@ gen8_create_blend_state(struct sna_static_stream *stream)
 			assert(((ptr - base) & 63) == 0);
 			COMPILE_TIME_ASSERT(sizeof(blend->common) == 4);
 			COMPILE_TIME_ASSERT(sizeof(blend->rt) == 8);
+			COMPILE_TIME_ASSERT((char *)&blend->rt - (char *)blend == 4);
 
 			blend->rt.post_blend_clamp = 1;
 			blend->rt.pre_blend_clamp = 1;
@@ -1813,6 +1899,18 @@ gen8_composite_picture(struct sna *sna,
 		y += dy;
 		channel->transform = NULL;
 		channel->filter = PictFilterNearest;
+
+		if (channel->repeat ||
+		    (x >= 0 &&
+		     y >= 0 &&
+		     x + w <= pixmap->drawable.width &&
+		     y + h <= pixmap->drawable.height)) {
+			struct sna_pixmap *priv = sna_pixmap(pixmap);
+			if (priv && priv->clear) {
+				DBG(("%s: converting large pixmap source into solid [%08x]\n", __FUNCTION__, priv->clear_color));
+				return gen4_channel_init_solid(sna, channel, solid_color(picture->format, priv->clear_color));
+			}
+		}
 	} else
 		channel->transform = picture->transform;
 
@@ -1834,13 +1932,18 @@ gen8_composite_picture(struct sna *sna,
 				    x, y, w, h, dst_x, dst_y);
 }
 
-static void gen8_composite_channel_convert(struct sna_composite_channel *channel)
+inline static bool gen8_composite_channel_convert(struct sna_composite_channel *channel)
 {
+	if (unaligned(channel->bo, PICT_FORMAT_BPP(channel->pict_format)))
+		return false;
+
 	channel->repeat = gen8_repeat(channel->repeat);
 	channel->filter = gen8_filter(channel->filter);
 	if (channel->card_format == (unsigned)-1)
 		channel->card_format = gen8_get_card_format(channel->pict_format);
 	assert(channel->card_format != (unsigned)-1);
+
+	return true;
 }
 
 static void gen8_render_composite_done(struct sna *sna,
@@ -1859,7 +1962,7 @@ static void gen8_render_composite_done(struct sna *sna,
 	sna_render_composite_redirect_done(sna, op);
 }
 
-static bool
+inline static bool
 gen8_composite_set_target(struct sna *sna,
 			  struct sna_composite_op *op,
 			  PicturePtr dst,
@@ -1887,7 +1990,7 @@ gen8_composite_set_target(struct sna *sna,
 
 	hint = PREFER_GPU | FORCE_GPU | RENDER_GPU;
 	if (!partial) {
-		hint |= IGNORE_CPU;
+		hint |= IGNORE_DAMAGE;
 		if (w == op->dst.width && h == op->dst.height)
 			hint |= REPLACES;
 	}
@@ -1896,12 +1999,20 @@ gen8_composite_set_target(struct sna *sna,
 	if (op->dst.bo == NULL)
 		return false;
 
+	if (unaligned(op->dst.bo, dst->pDrawable->bitsPerPixel))
+		return false;
+
+	if (hint & REPLACES) {
+		struct sna_pixmap *priv = sna_pixmap(op->dst.pixmap);
+		kgem_bo_pair_undo(&sna->kgem, priv->gpu_bo, priv->cpu_bo);
+	}
+
 	get_drawable_deltas(dst->pDrawable, op->dst.pixmap,
 			    &op->dst.x, &op->dst.y);
 
-	DBG(("%s: pixmap=%p, format=%08x, size=%dx%d, pitch=%d, delta=(%d,%d),damage=%p\n",
+	DBG(("%s: pixmap=%ld, format=%08x, size=%dx%d, pitch=%d, delta=(%d,%d),damage=%p\n",
 	     __FUNCTION__,
-	     op->dst.pixmap, (int)op->dst.format,
+	     op->dst.pixmap->drawable.serialNumber, (int)op->dst.format,
 	     op->dst.width, op->dst.height,
 	     op->dst.bo->pitch,
 	     op->dst.x, op->dst.y,
@@ -1918,43 +2029,78 @@ gen8_composite_set_target(struct sna *sna,
 
 static bool
 try_blt(struct sna *sna,
-	PicturePtr dst, PicturePtr src,
-	int width, int height)
+	uint8_t op,
+	PicturePtr src,
+	PicturePtr mask,
+	PicturePtr dst,
+	int16_t src_x, int16_t src_y,
+	int16_t msk_x, int16_t msk_y,
+	int16_t dst_x, int16_t dst_y,
+	int16_t width, int16_t height,
+	unsigned flags,
+	struct sna_composite_op *tmp)
 {
 	struct kgem_bo *bo;
 
 	if (sna->kgem.mode == KGEM_BLT) {
 		DBG(("%s: already performing BLT\n", __FUNCTION__));
-		return true;
+		goto execute;
 	}
 
 	if (too_large(width, height)) {
 		DBG(("%s: operation too large for 3D pipe (%d, %d)\n",
 		     __FUNCTION__, width, height));
-		return true;
+		goto execute;
 	}
 
 	bo = __sna_drawable_peek_bo(dst->pDrawable);
-	if (bo && bo->rq)
-		return RQ_IS_BLT(bo->rq);
+	if (bo == NULL)
+		goto execute;
 
-	if (sna_picture_is_solid(src, NULL) && can_switch_to_blt(sna, NULL, 0))
-		return true;
+	if (untiled_tlb_miss(bo))
+		goto execute;
+
+	if (bo->rq) {
+		if (RQ_IS_BLT(bo->rq))
+			goto execute;
+
+		return false;
+	}
+
+	if (bo->tiling == I915_TILING_Y)
+		goto upload;
+
+	if (sna_picture_is_solid(src, NULL) && can_switch_to_blt(sna, bo, 0))
+		goto execute;
+
+	if (src->pDrawable == dst->pDrawable &&
+	    (sna->render_state.gt < 3 || width*height < 1024) &&
+	    can_switch_to_blt(sna, bo, 0))
+		goto execute;
 
 	if (src->pDrawable) {
-		bo = __sna_drawable_peek_bo(src->pDrawable);
-		if (bo == NULL)
-			return true;
-		else if (bo->rq)
-			return RQ_IS_BLT(bo->rq);
+		struct kgem_bo *s = __sna_drawable_peek_bo(src->pDrawable);
+		if (s == NULL)
+			goto upload;
+
+		if (prefer_blt_bo(sna, s, bo))
+			goto execute;
 	}
 
 	if (sna->kgem.ring == KGEM_BLT) {
 		DBG(("%s: already performing BLT\n", __FUNCTION__));
-		return true;
+		goto execute;
 	}
 
-	return false;
+upload:
+	flags |= COMPOSITE_UPLOAD;
+execute:
+	return sna_blt_composite(sna, op,
+				 src, dst,
+				 src_x, src_y,
+				 dst_x, dst_y,
+				 width, height,
+				 flags, tmp);
 }
 
 static bool
@@ -2184,13 +2330,13 @@ gen8_render_composite(struct sna *sna,
 	     width, height, sna->kgem.mode, sna->kgem.ring));
 
 	if (mask == NULL &&
-	    try_blt(sna, dst, src, width, height) &&
-	    sna_blt_composite(sna, op,
-			      src, dst,
-			      src_x, src_y,
-			      dst_x, dst_y,
-			      width, height,
-			      flags, tmp))
+	    try_blt(sna, op,
+		    src, mask, dst,
+		    src_x, src_y,
+		    msk_x, msk_y,
+		    dst_x, dst_y,
+		    width, height,
+		    flags, tmp))
 		return true;
 
 	if (gen8_composite_fallback(sna, src, mask, dst))
@@ -2209,7 +2355,7 @@ gen8_render_composite(struct sna *sna,
 	tmp->op = op;
 	if (!gen8_composite_set_target(sna, tmp, dst,
 				       dst_x, dst_y, width, height,
-				       flags & COMPOSITE_PARTIAL || op > PictOpSrc || dst->pCompositeClip->data))
+				       flags & COMPOSITE_PARTIAL || op > PictOpSrc))
 		goto fallback;
 
 	switch (gen8_composite_picture(sna, src, &tmp->src,
@@ -2226,13 +2372,16 @@ gen8_render_composite(struct sna *sna,
 	case 1:
 		/* Did we just switch rings to prepare the source? */
 		if (mask == NULL &&
-		    prefer_blt_composite(sna, tmp) &&
+		    (prefer_blt_composite(sna, tmp) ||
+		     unaligned(tmp->src.bo, PICT_FORMAT_BPP(tmp->src.pict_format))) &&
 		    sna_blt_composite__convert(sna,
 					       dst_x, dst_y, width, height,
 					       tmp))
 			return true;
 
-		gen8_composite_channel_convert(&tmp->src);
+		if (!gen8_composite_channel_convert(&tmp->src))
+			goto cleanup_src;
+
 		break;
 	}
 
@@ -2277,7 +2426,8 @@ gen8_render_composite(struct sna *sna,
 					goto cleanup_src;
 				/* fall through to fixup */
 			case 1:
-				gen8_composite_channel_convert(&tmp->mask);
+				if (!gen8_composite_channel_convert(&tmp->mask))
+					goto cleanup_mask;
 				break;
 			}
 		}
@@ -2511,7 +2661,8 @@ gen8_render_composite_spans(struct sna *sna,
 			goto cleanup_dst;
 		/* fall through to fixup */
 	case 1:
-		gen8_composite_channel_convert(&tmp->base.src);
+		if (!gen8_composite_channel_convert(&tmp->base.src))
+			goto cleanup_src;
 		break;
 	}
 	tmp->base.mask.bo = NULL;
@@ -2608,19 +2759,29 @@ prefer_blt_copy(struct sna *sna,
 
 	assert((flags & COPY_SYNC) == 0);
 
-	if (src_bo == dst_bo && can_switch_to_blt(sna, dst_bo, flags))
-		return true;
-
 	if (untiled_tlb_miss(src_bo) ||
 	    untiled_tlb_miss(dst_bo))
 		return true;
 
-	if (force_blt_ring(sna))
+	if (flags & COPY_DRI && !sna->kgem.has_semaphores)
+		return false;
+
+	if (force_blt_ring(sna, dst_bo))
+		return true;
+
+	if ((flags & COPY_SMALL ||
+	     (sna->render_state.gt < 3 && src_bo == dst_bo)) &&
+	    can_switch_to_blt(sna, dst_bo, flags))
 		return true;
 
 	if (kgem_bo_is_render(dst_bo) ||
 	    kgem_bo_is_render(src_bo))
 		return false;
+
+	if (flags & COPY_LAST &&
+	    sna->render_state.gt < 3 &&
+            can_switch_to_blt(sna, dst_bo, flags))
+		return true;
 
 	if (prefer_render_ring(sna, dst_bo))
 		return false;
@@ -2628,47 +2789,13 @@ prefer_blt_copy(struct sna *sna,
 	if (!prefer_blt_ring(sna, dst_bo, flags))
 		return false;
 
-	return prefer_blt_bo(sna, src_bo) || prefer_blt_bo(sna, dst_bo);
-}
-
-inline static void boxes_extents(const BoxRec *box, int n, BoxRec *extents)
-{
-	*extents = box[0];
-	while (--n) {
-		box++;
-
-		if (box->x1 < extents->x1)
-			extents->x1 = box->x1;
-		if (box->x2 > extents->x2)
-			extents->x2 = box->x2;
-
-		if (box->y1 < extents->y1)
-			extents->y1 = box->y1;
-		if (box->y2 > extents->y2)
-			extents->y2 = box->y2;
-	}
-}
-
-static inline bool
-overlaps(struct sna *sna,
-	 struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-	 struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
-	 const BoxRec *box, int n, BoxRec *extents)
-{
-	if (src_bo != dst_bo)
-		return false;
-
-	boxes_extents(box, n, extents);
-	return (extents->x2 + src_dx > extents->x1 + dst_dx &&
-		extents->x1 + src_dx < extents->x2 + dst_dx &&
-		extents->y2 + src_dy > extents->y1 + dst_dy &&
-		extents->y1 + src_dy < extents->y2 + dst_dy);
+	return prefer_blt_bo(sna, src_bo, dst_bo);
 }
 
 static bool
 gen8_render_copy_boxes(struct sna *sna, uint8_t alu,
-		       PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-		       PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+		       const DrawableRec *src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+		       const DrawableRec *dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 		       const BoxRec *box, int n, unsigned flags)
 {
 	struct sna_composite_op tmp;
@@ -2680,21 +2807,23 @@ gen8_render_copy_boxes(struct sna *sna, uint8_t alu,
 	     overlaps(sna,
 		      src_bo, src_dx, src_dy,
 		      dst_bo, dst_dx, dst_dy,
-		      box, n, &extents)));
+		      box, n, flags, &extents)));
 
 	if (prefer_blt_copy(sna, src_bo, dst_bo, flags) &&
-	    sna_blt_compare_depth(&src->drawable, &dst->drawable) &&
+	    sna_blt_compare_depth(src, dst) &&
 	    sna_blt_copy_boxes(sna, alu,
 			       src_bo, src_dx, src_dy,
 			       dst_bo, dst_dx, dst_dy,
-			       dst->drawable.bitsPerPixel,
+			       dst->bitsPerPixel,
 			       box, n))
 		return true;
 
-	if (!(alu == GXcopy || alu == GXclear)) {
+	if (!(alu == GXcopy || alu == GXclear) ||
+	    unaligned(src_bo, src->bitsPerPixel) ||
+	    unaligned(dst_bo, dst->bitsPerPixel)) {
 fallback_blt:
 		DBG(("%s: fallback blt\n", __FUNCTION__));
-		if (!sna_blt_compare_depth(&src->drawable, &dst->drawable))
+		if (!sna_blt_compare_depth(src, dst))
 			return false;
 
 		return sna_blt_copy_boxes_fallback(sna, alu,
@@ -2706,38 +2835,44 @@ fallback_blt:
 	if (overlaps(sna,
 		     src_bo, src_dx, src_dy,
 		     dst_bo, dst_dx, dst_dy,
-		     box, n, &extents)) {
-		if (too_large(extents.x2-extents.x1, extents.y2-extents.y1))
-			goto fallback_blt;
+		     box, n, flags,
+		     &extents)) {
+		bool big = too_large(extents.x2-extents.x1, extents.y2-extents.y1);
 
-		if (can_switch_to_blt(sna, dst_bo, flags) &&
-		    sna_blt_compare_depth(&src->drawable, &dst->drawable) &&
+		if ((big || !prefer_render_ring(sna, dst_bo)) &&
 		    sna_blt_copy_boxes(sna, alu,
 				       src_bo, src_dx, src_dy,
 				       dst_bo, dst_dx, dst_dy,
-				       dst->drawable.bitsPerPixel,
+				       dst->bitsPerPixel,
 				       box, n))
 			return true;
 
-		return sna_render_copy_boxes__overlap(sna, alu,
-						      src, src_bo, src_dx, src_dy,
-						      dst, dst_bo, dst_dx, dst_dy,
+		if (big)
+			goto fallback_blt;
+
+		assert(src_bo == dst_bo);
+		assert(src->depth == dst->depth);
+		assert(src->width == dst->width);
+		assert(src->height == dst->height);
+		return sna_render_copy_boxes__overlap(sna, alu, dst, dst_bo,
+						      src_dx, src_dy,
+						      dst_dx, dst_dy,
 						      box, n, &extents);
 	}
 
-	if (dst->drawable.depth == src->drawable.depth) {
-		tmp.dst.format = sna_render_format_for_depth(dst->drawable.depth);
+	if (dst->depth == src->depth) {
+		tmp.dst.format = sna_render_format_for_depth(dst->depth);
 		tmp.src.pict_format = tmp.dst.format;
 	} else {
-		tmp.dst.format = sna_format_for_depth(dst->drawable.depth);
-		tmp.src.pict_format = sna_format_for_depth(src->drawable.depth);
+		tmp.dst.format = sna_format_for_depth(dst->depth);
+		tmp.src.pict_format = sna_format_for_depth(src->depth);
 	}
 	if (!gen8_check_format(tmp.src.pict_format))
 		goto fallback_blt;
 
-	tmp.dst.pixmap = dst;
-	tmp.dst.width  = dst->drawable.width;
-	tmp.dst.height = dst->drawable.height;
+	tmp.dst.pixmap = (PixmapPtr)dst;
+	tmp.dst.width  = dst->width;
+	tmp.dst.height = dst->height;
 	tmp.dst.bo = dst_bo;
 	tmp.dst.x = tmp.dst.y = 0;
 	tmp.damage = NULL;
@@ -2766,15 +2901,10 @@ fallback_blt:
 						   extents.y2 - extents.y1,
 						   n > 1))
 			goto fallback_tiled;
-
-		dst_dx += tmp.dst.x;
-		dst_dy += tmp.dst.y;
-
-		tmp.dst.x = tmp.dst.y = 0;
 	}
 
 	tmp.src.card_format = gen8_get_card_format(tmp.src.pict_format);
-	if (too_large(src->drawable.width, src->drawable.height)) {
+	if (too_large(src->width, src->height)) {
 		int i;
 
 		extents = box[0];
@@ -2796,13 +2926,11 @@ fallback_blt:
 					       extents.x2 - extents.x1,
 					       extents.y2 - extents.y1))
 			goto fallback_tiled_dst;
-
-		src_dx += tmp.src.offset[0];
-		src_dy += tmp.src.offset[1];
 	} else {
 		tmp.src.bo = src_bo;
-		tmp.src.width  = src->drawable.width;
-		tmp.src.height = src->drawable.height;
+		tmp.src.width  = src->width;
+		tmp.src.height = src->height;
+		tmp.src.offset[0] = tmp.src.offset[1] = 0;
 	}
 
 	tmp.mask.bo = NULL;
@@ -2825,6 +2953,14 @@ fallback_blt:
 		}
 		_kgem_set_mode(&sna->kgem, KGEM_RENDER);
 	}
+
+	src_dx += tmp.src.offset[0];
+	src_dy += tmp.src.offset[1];
+
+	dst_dx += tmp.dst.x;
+	dst_dy += tmp.dst.y;
+
+	tmp.dst.x = tmp.dst.y = 0;
 
 	gen8_align_vertex(sna, &tmp);
 	gen8_emit_copy_state(sna, &tmp);
@@ -2869,11 +3005,11 @@ fallback_tiled_dst:
 		kgem_bo_destroy(&sna->kgem, tmp.dst.bo);
 fallback_tiled:
 	DBG(("%s: fallback tiled\n", __FUNCTION__));
-	if (sna_blt_compare_depth(&src->drawable, &dst->drawable) &&
+	if (sna_blt_compare_depth(src, dst) &&
 	    sna_blt_copy_boxes(sna, alu,
 			       src_bo, src_dx, src_dy,
 			       dst_bo, dst_dx, dst_dy,
-			       dst->drawable.bitsPerPixel,
+			       dst->bitsPerPixel,
 			       box, n))
 		return true;
 
@@ -2934,7 +3070,9 @@ gen8_render_copy(struct sna *sna, uint8_t alu,
 
 	if (!(alu == GXcopy || alu == GXclear) || src_bo == dst_bo ||
 	    too_large(src->drawable.width, src->drawable.height) ||
-	    too_large(dst->drawable.width, dst->drawable.height)) {
+	    too_large(dst->drawable.width, dst->drawable.height) ||
+	    unaligned(src_bo, src->drawable.bitsPerPixel) ||
+	    unaligned(dst_bo, dst->drawable.bitsPerPixel)) {
 fallback:
 		if (!sna_blt_compare_depth(&src->drawable, &dst->drawable))
 			return false;
@@ -3034,7 +3172,7 @@ gen8_render_fill_boxes(struct sna *sna,
 		       CARD8 op,
 		       PictFormat format,
 		       const xRenderColor *color,
-		       PixmapPtr dst, struct kgem_bo *dst_bo,
+		       const DrawableRec *dst, struct kgem_bo *dst_bo,
 		       const BoxRec *box, int n)
 {
 	struct sna_composite_op tmp;
@@ -3051,7 +3189,8 @@ gen8_render_fill_boxes(struct sna *sna,
 	}
 
 	if (prefer_blt_fill(sna, dst_bo, FILL_BOXES) ||
-	    !gen8_check_dst_format(format)) {
+	    !gen8_check_dst_format(format) ||
+	    unaligned(dst_bo, PICT_FORMAT_BPP(format))) {
 		uint8_t alu = GXinvalid;
 
 		if (op <= PictOpSrc) {
@@ -3069,7 +3208,7 @@ gen8_render_fill_boxes(struct sna *sna,
 
 		if (alu != GXinvalid &&
 		    sna_blt_fill_boxes(sna, alu,
-				       dst_bo, dst->drawable.bitsPerPixel,
+				       dst_bo, dst->bitsPerPixel,
 				       pixel, box, n))
 			return true;
 
@@ -3092,16 +3231,16 @@ gen8_render_fill_boxes(struct sna *sna,
 	     __FUNCTION__, pixel, n,
 	     box[0].x1, box[0].y1, box[0].x2, box[0].y2));
 
-	tmp.dst.pixmap = dst;
-	tmp.dst.width  = dst->drawable.width;
-	tmp.dst.height = dst->drawable.height;
+	tmp.dst.pixmap = (PixmapPtr)dst;
+	tmp.dst.width  = dst->width;
+	tmp.dst.height = dst->height;
 	tmp.dst.format = format;
 	tmp.dst.bo = dst_bo;
 	tmp.dst.x = tmp.dst.y = 0;
 	tmp.damage = NULL;
 
 	sna_render_composite_redirect_init(&tmp);
-	if (too_large(dst->drawable.width, dst->drawable.height)) {
+	if (too_large(dst->width, dst->height)) {
 		BoxRec extents;
 
 		boxes_extents(box, n, &extents);
@@ -3280,7 +3419,8 @@ gen8_render_fill(struct sna *sna, uint8_t alu,
 		return true;
 
 	if (!(alu == GXcopy || alu == GXclear) ||
-	    too_large(dst->drawable.width, dst->drawable.height))
+	    too_large(dst->drawable.width, dst->drawable.height) ||
+	    unaligned(dst_bo, dst->drawable.bitsPerPixel))
 		return sna_blt_fill(sna, alu,
 				    dst_bo, dst->drawable.bitsPerPixel,
 				    color,
@@ -3366,7 +3506,8 @@ gen8_render_fill_one(struct sna *sna, PixmapPtr dst, struct kgem_bo *bo,
 
 	/* Must use the BLT if we can't RENDER... */
 	if (!(alu == GXcopy || alu == GXclear) ||
-	    too_large(dst->drawable.width, dst->drawable.height))
+	    too_large(dst->drawable.width, dst->drawable.height) ||
+	    unaligned(bo, dst->drawable.bitsPerPixel))
 		return gen8_render_fill_one_try_blt(sna, dst, bo, color,
 						    x1, y1, x2, y2, alu);
 
@@ -3458,7 +3599,8 @@ gen8_render_clear(struct sna *sna, PixmapPtr dst, struct kgem_bo *bo)
 		return true;
 
 	/* Must use the BLT if we can't RENDER... */
-	if (too_large(dst->drawable.width, dst->drawable.height))
+	if (too_large(dst->drawable.width, dst->drawable.height) ||
+	    unaligned(bo, dst->drawable.bitsPerPixel))
 		return gen8_render_clear_try_blt(sna, dst, bo);
 
 	tmp.dst.pixmap = dst;
@@ -3631,29 +3773,29 @@ gen8_render_video(struct sna *sna,
 		  PixmapPtr pixmap)
 {
 	struct sna_composite_op tmp;
+	struct sna_pixmap *priv = sna_pixmap(pixmap);
 	int dst_width = dstRegion->extents.x2 - dstRegion->extents.x1;
 	int dst_height = dstRegion->extents.y2 - dstRegion->extents.y1;
 	int src_width = frame->src.x2 - frame->src.x1;
 	int src_height = frame->src.y2 - frame->src.y1;
 	float src_offset_x, src_offset_y;
 	float src_scale_x, src_scale_y;
-	int nbox, pix_xoff, pix_yoff;
-	struct sna_pixmap *priv;
 	unsigned filter;
-	BoxPtr box;
+	const BoxRec *box;
+	int nbox;
 
-	DBG(("%s: src=(%d, %d), dst=(%d, %d), %ldx[(%d, %d), (%d, %d)...]\n",
+	DBG(("%s: src=(%d, %d), dst=(%d, %d), %dx[(%d, %d), (%d, %d)...]\n",
 	     __FUNCTION__,
 	     src_width, src_height, dst_width, dst_height,
-	     (long)REGION_NUM_RECTS(dstRegion),
+	     region_num_rects(dstRegion),
 	     REGION_EXTENTS(NULL, dstRegion)->x1,
 	     REGION_EXTENTS(NULL, dstRegion)->y1,
 	     REGION_EXTENTS(NULL, dstRegion)->x2,
 	     REGION_EXTENTS(NULL, dstRegion)->y2));
 
-	priv = sna_pixmap_force_to_gpu(pixmap, MOVE_READ | MOVE_WRITE);
-	if (priv == NULL)
-		return false;
+	assert(priv->gpu_bo);
+	assert(!too_large(pixmap->drawable.width, pixmap->drawable.height));
+	assert(!unaligned(priv->gpu_bo, pixmap->drawable.bitsPerPixel));
 
 	memset(&tmp, 0, sizeof(tmp));
 
@@ -3687,23 +3829,14 @@ gen8_render_video(struct sna *sna,
 	kgem_set_mode(&sna->kgem, KGEM_RENDER, tmp.dst.bo);
 	if (!kgem_check_bo(&sna->kgem, tmp.dst.bo, frame->bo, NULL)) {
 		kgem_submit(&sna->kgem);
-		assert(kgem_check_bo(&sna->kgem, tmp.dst.bo, frame->bo, NULL));
+		if (!kgem_check_bo(&sna->kgem, tmp.dst.bo, frame->bo, NULL))
+			return false;
+
 		_kgem_set_mode(&sna->kgem, KGEM_RENDER);
 	}
 
 	gen8_align_vertex(sna, &tmp);
 	gen8_emit_video_state(sna, &tmp);
-
-	/* Set up the offset for translating from the given region (in screen
-	 * coordinates) to the backing pixmap.
-	 */
-#ifdef COMPOSITE
-	pix_xoff = -pixmap->screen_x + pixmap->drawable.x;
-	pix_yoff = -pixmap->screen_y + pixmap->drawable.y;
-#else
-	pix_xoff = 0;
-	pix_yoff = 0;
-#endif
 
 	DBG(("%s: src=(%d, %d)x(%d, %d); frame=(%dx%d), dst=(%dx%d)\n",
 	     __FUNCTION__,
@@ -3723,48 +3856,39 @@ gen8_render_video(struct sna *sna,
 	     src_scale_x, src_scale_y,
 	     src_offset_x, src_offset_y));
 
-	box = REGION_RECTS(dstRegion);
-	nbox = REGION_NUM_RECTS(dstRegion);
+	box = region_rects(dstRegion);
+	nbox = region_num_rects(dstRegion);
 	while (nbox--) {
-		BoxRec r;
-
 		DBG(("%s: dst=(%d, %d), (%d, %d) + (%d, %d); src=(%f, %f), (%f, %f)\n",
 		     __FUNCTION__,
 		     box->x1, box->y1,
 		     box->x2, box->y2,
-		     pix_xoff, pix_yoff,
 		     box->x1 * src_scale_x + src_offset_x,
 		     box->y1 * src_scale_y + src_offset_y,
 		     box->x2 * src_scale_x + src_offset_x,
 		     box->y2 * src_scale_y + src_offset_y));
 
-		r.x1 = box->x1 + pix_xoff;
-		r.x2 = box->x2 + pix_xoff;
-		r.y1 = box->y1 + pix_yoff;
-		r.y2 = box->y2 + pix_yoff;
-
 		gen8_get_rectangles(sna, &tmp, 1, gen8_emit_video_state);
 
-		OUT_VERTEX(r.x2, r.y2);
+		OUT_VERTEX(box->x2, box->y2);
 		OUT_VERTEX_F(box->x2 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(r.x1, r.y2);
+		OUT_VERTEX(box->x1, box->y2);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(r.x1, r.y1);
+		OUT_VERTEX(box->x1, box->y1);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y1 * src_scale_y + src_offset_y);
 
-		if (!DAMAGE_IS_ALL(priv->gpu_damage)) {
-			sna_damage_add_box(&priv->gpu_damage, &r);
-			sna_damage_subtract_box(&priv->cpu_damage, &r);
-		}
 		box++;
 	}
-
 	gen8_vertex_flush(sna);
+
+	if (!DAMAGE_IS_ALL(priv->gpu_damage))
+		sna_damage_add(&priv->gpu_damage, dstRegion);
+
 	return true;
 }
 #endif
@@ -3813,6 +3937,19 @@ static bool gen8_render_setup(struct sna *sna)
 	struct sna_static_stream general;
 	struct gen8_sampler_state *ss;
 	int i, j, k, l, m;
+	uint32_t devid;
+
+	devid = intel_get_device_id(sna->dev);
+	if (devid & 0xf)
+		state->gt = ((devid >> 4) & 0xf) + 1;
+	DBG(("%s: gt=%d\n", __FUNCTION__, state->gt));
+
+	if (is_bdw(sna))
+		state->info = &bdw_gt_info;
+	else if (is_chv(sna))
+		state->info = &chv_gt_info;
+	else
+		return false;
 
 	sna_static_stream_init(&general);
 
@@ -3925,5 +4062,5 @@ const char *gen8_render_init(struct sna *sna, const char *backend)
 
 	sna->render.max_3d_size = GEN8_MAX_SIZE;
 	sna->render.max_3d_pitch = 1 << 18;
-	return "Broadwell";
+	return sna->render_state.gen8.info->name;
 }

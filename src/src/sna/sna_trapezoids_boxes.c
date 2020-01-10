@@ -73,9 +73,9 @@ static void _assert_pixmap_contains_box(PixmapPtr pixmap, BoxPtr box, const char
 
 static void apply_damage(struct sna_composite_op *op, RegionPtr region)
 {
-	DBG(("%s: damage=%p, region=%ldx[(%d, %d), (%d, %d)]\n",
+	DBG(("%s: damage=%p, region=%dx[(%d, %d), (%d, %d)]\n",
 	     __FUNCTION__, op->damage,
-	     (long)REGION_NUM_RECTS(region),
+	     region_num_rects(region),
 	     region->extents.x1, region->extents.y1,
 	     region->extents.x2, region->extents.y2));
 
@@ -85,7 +85,8 @@ static void apply_damage(struct sna_composite_op *op, RegionPtr region)
 	RegionTranslate(region, op->dst.x, op->dst.y);
 
 	assert_pixmap_contains_box(op->dst.pixmap, RegionExtents(region));
-	sna_damage_add(op->damage, region);
+	if (sna_damage_add_to_pixmap(op->damage, region, op->dst.pixmap))
+		op->damage = NULL;
 }
 
 static void _apply_damage_box(struct sna_composite_op *op, const BoxRec *box)
@@ -120,13 +121,16 @@ composite_aligned_boxes(struct sna *sna,
 	BoxRec stack_boxes[64], *boxes;
 	pixman_region16_t region, clip;
 	struct sna_composite_op tmp;
+	int16_t dst_x, dst_y;
 	bool ret = true;
 	int dx, dy, n, num_boxes;
 
 	if (NO_ALIGNED_BOXES)
 		return false;
 
-	DBG(("%s\n", __FUNCTION__));
+	DBG(("%s: pixmap=%ld, nboxes=%d, dx=(%d, %d)\n", __FUNCTION__,
+	    get_drawable_pixmap(dst->pDrawable)->drawable.serialNumber,
+	    ntrap, dst->pDrawable->x, dst->pDrawable->y));
 
 	boxes = stack_boxes;
 	if (ntrap > (int)ARRAY_SIZE(stack_boxes)) {
@@ -168,19 +172,20 @@ composite_aligned_boxes(struct sna *sna,
 	if (num_boxes == 0)
 		goto free_boxes;
 
-	DBG(("%s: extents (%d, %d), (%d, %d) offset of (%d, %d)\n",
+	trapezoid_origin(&traps[0].left, &dst_x, &dst_y);
+
+	DBG(("%s: extents (%d, %d), (%d, %d) offset of (%d, %d), origin (%d, %d)\n",
 	     __FUNCTION__,
 	     region.extents.x1, region.extents.y1,
 	     region.extents.x2, region.extents.y2,
 	     region.extents.x1 - boxes[0].x1,
-	     region.extents.y1 - boxes[0].y1));
-
-	src_x += region.extents.x1 - boxes[0].x1;
-	src_y += region.extents.y1 - boxes[0].y1;
+	     region.extents.y1 - boxes[0].y1,
+	     dst_x, dst_y));
 
 	if (!sna_compute_composite_region(&clip,
 					  src, NULL, dst,
-					  src_x,  src_y,
+					  src_x + region.extents.x1 - dst_x - dx,
+					  src_y + region.extents.y1 - dst_y - dy,
 					  0, 0,
 					  region.extents.x1 - dx, region.extents.y1 - dy,
 					  region.extents.x2 - region.extents.x1,
@@ -193,24 +198,37 @@ composite_aligned_boxes(struct sna *sna,
 	if (op == PictOpClear && sna->clear)
 		src = sna->clear;
 
+	DBG(("%s: clipped extents (%d, %d), (%d, %d);  now offset by (%d, %d), origin (%d, %d)\n",
+	     __FUNCTION__,
+	     clip.extents.x1, clip.extents.y1,
+	     clip.extents.x2, clip.extents.y2,
+	     clip.extents.x1 - boxes[0].x1,
+	     clip.extents.y1 - boxes[0].y1,
+	     dst_x, dst_y));
+
 	if (force_fallback ||
 	    !sna->render.composite(sna, op, src, NULL, dst,
-				   src_x,  src_y,
+				   src_x + clip.extents.x1 - dst_x,
+				   src_y + clip.extents.y1 - dst_y,
 				   0, 0,
 				   clip.extents.x1,  clip.extents.y1,
 				   clip.extents.x2 - clip.extents.x1,
 				   clip.extents.y2 - clip.extents.y1,
-				   COMPOSITE_PARTIAL, memset(&tmp, 0, sizeof(tmp)))) {
+				   (clip.data || num_boxes > 1) ?  COMPOSITE_PARTIAL : 0,
+				   memset(&tmp, 0, sizeof(tmp)))) {
 		unsigned int flags;
-		pixman_box16_t *b;
+		const pixman_box16_t *b;
 		int i, count;
 
 		DBG(("%s: composite render op not supported\n",
 		     __FUNCTION__));
 
 		flags = MOVE_READ | MOVE_WRITE;
-		if (n == 1 && op <= PictOpSrc)
-			flags = MOVE_WRITE | MOVE_INPLACE_HINT;
+		if (op <= PictOpSrc) {
+			flags |= MOVE_INPLACE_HINT;
+			if (n == 1)
+				flags &= ~MOVE_READ;
+		}
 
 		if (!sna_drawable_move_region_to_cpu(dst->pDrawable, &clip, flags))
 			goto done;
@@ -229,17 +247,19 @@ composite_aligned_boxes(struct sna *sna,
 		}
 
 		DBG(("%s: fbComposite()\n", __FUNCTION__));
+		src_x -= dst_x - dx;
+		src_y -= dst_y - dy;
 		if (maskFormat) {
 			pixman_region_init_rects(&region, boxes, num_boxes);
 			RegionIntersect(&region, &region, &clip);
 
 			if (sigtrap_get() == 0) {
-				b = REGION_RECTS(&region);
-				count = REGION_NUM_RECTS(&region);
+				b = region_rects(&region);
+				count = region_num_rects(&region);
 				for (i = 0; i < count; i++) {
 					fbComposite(op, src, NULL, dst,
-						    src_x + b[i].x1 - boxes[0].x1,
-						    src_y + b[i].y1 - boxes[0].y1,
+						    src_x + b[i].x1,
+						    src_y + b[i].y1,
 						    0, 0,
 						    b[i].x1, b[i].y1,
 						    b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
@@ -251,13 +271,13 @@ composite_aligned_boxes(struct sna *sna,
 			for (n = 0; n < num_boxes; n++) {
 				pixman_region_init_rects(&region, &boxes[n], 1);
 				RegionIntersect(&region, &region, &clip);
-				b = REGION_RECTS(&region);
-				count = REGION_NUM_RECTS(&region);
+				b = region_rects(&region);
+				count = region_num_rects(&region);
 				if (sigtrap_get() == 0) {
 					for (i = 0; i < count; i++) {
 						fbComposite(op, src, NULL, dst,
-							    src_x + b[i].x1 - boxes[0].x1,
-							    src_y + b[i].y1 - boxes[0].y1,
+							    src_x + b[i].x1,
+							    src_y + b[i].y1,
 							    0, 0,
 							    b[i].x1, b[i].y1,
 							    b[i].x2 - b[i].x1, b[i].y2 - b[i].y1);
@@ -277,10 +297,10 @@ composite_aligned_boxes(struct sna *sna,
 	    num_boxes == 1) {
 		pixman_region_init_rects(&region, boxes, num_boxes);
 		RegionIntersect(&region, &region, &clip);
-		if (REGION_NUM_RECTS(&region)) {
+		if (region_num_rects(&region)) {
 			tmp.boxes(sna, &tmp,
-				  REGION_RECTS(&region),
-				  REGION_NUM_RECTS(&region));
+				  region_rects(&region),
+				  region_num_rects(&region));
 			apply_damage(&tmp, &region);
 		}
 		pixman_region_fini(&region);
@@ -288,10 +308,10 @@ composite_aligned_boxes(struct sna *sna,
 		for (n = 0; n < num_boxes; n++) {
 			pixman_region_init_rects(&region, &boxes[n], 1);
 			RegionIntersect(&region, &region, &clip);
-			if (REGION_NUM_RECTS(&region)) {
+			if (region_num_rects(&region)) {
 				tmp.boxes(sna, &tmp,
-					  REGION_RECTS(&region),
-					  REGION_NUM_RECTS(&region));
+					  region_rects(&region),
+					  region_num_rects(&region));
 				apply_damage(&tmp, &region);
 			}
 			pixman_region_fini(&region);
@@ -327,10 +347,10 @@ composite_unaligned_box(struct sna *sna,
 
 		pixman_region_init_rects(&region, box, 1);
 		RegionIntersect(&region, &region, clip);
-		if (REGION_NUM_RECTS(&region))
+		if (region_num_rects(&region))
 			tmp->boxes(sna, tmp,
-				   REGION_RECTS(&region),
-				   REGION_NUM_RECTS(&region),
+				   region_rects(&region),
+				   region_num_rects(&region),
 				   opacity);
 		pixman_region_fini(&region);
 	} else
@@ -469,7 +489,7 @@ composite_unaligned_trap(struct sna *sna,
 
 			pixman_region_init_rects(&region, &box, 1);
 			RegionIntersect(&region, &region, clip);
-			if (REGION_NUM_RECTS(&region))
+			if (region_num_rects(&region))
 				apply_damage(&tmp->base, &region);
 			RegionUninit(&region);
 		} else
@@ -571,6 +591,8 @@ lerp32_opacity(PixmapPtr scratch,
 {
 	uint32_t *ptr;
 	int stride, i;
+
+	sigtrap_assert_active();
 
 	ptr = (uint32_t*)((uint8_t *)scratch->devPrivate.ptr + scratch->devKind * y);
 	ptr += x;
@@ -678,8 +700,8 @@ pixsolid_opacity(struct pixman_inplace *pi,
 		*pi->bits = pi->color;
 	else
 		*pi->bits = mul_4x8_8(pi->color, opacity);
-	pixman_image_composite(pi->op, pi->source, NULL, pi->image,
-			       0, 0, 0, 0, pi->dx + x, pi->dy + y, w, h);
+	sna_image_composite(pi->op, pi->source, NULL, pi->image,
+			    0, 0, 0, 0, pi->dx + x, pi->dy + y, w, h);
 }
 
 static void
@@ -768,7 +790,7 @@ composite_unaligned_boxes_inplace__solid(struct sna *sna,
 	     __FUNCTION__, n));
 	do {
 		RegionRec clip;
-		BoxPtr extents;
+		const BoxRec *extents;
 		int count;
 
 		clip.extents.x1 = pixman_fixed_to_int(t->left.p1.x);
@@ -794,8 +816,8 @@ composite_unaligned_boxes_inplace__solid(struct sna *sna,
 
 		if (sigtrap_get() == 0) {
 			RegionTranslate(&clip, dx, dy);
-			count = REGION_NUM_RECTS(&clip);
-			extents = REGION_RECTS(&clip);
+			count = region_num_rects(&clip);
+			extents = region_rects(&clip);
 			while (count--) {
 				int16_t y1 = dy + pixman_fixed_to_int(t->top);
 				uint16_t fy1 = pixman_fixed_frac(t->top);
@@ -852,7 +874,7 @@ pixman:
 	do {
 		struct pixman_inplace pi;
 		RegionRec clip;
-		BoxPtr extents;
+		const BoxRec *extents;
 		int count;
 
 		clip.extents.x1 = pixman_fixed_to_int(t->left.p1.x);
@@ -884,8 +906,8 @@ pixman:
 		pi.op = op;
 
 		if (sigtrap_get() == 0) {
-			count = REGION_NUM_RECTS(&clip);
-			extents = REGION_RECTS(&clip);
+			count = region_num_rects(&clip);
+			extents = region_rects(&clip);
 			while (count--) {
 				int16_t y1 = pixman_fixed_to_int(t->top);
 				uint16_t fy1 = pixman_fixed_frac(t->top);
@@ -1068,7 +1090,7 @@ composite_unaligned_boxes_inplace(struct sna *sna,
 	src_y -= pixman_fixed_to_int(t[0].left.p1.y);
 	do {
 		RegionRec clip;
-		BoxPtr extents;
+		const BoxRec *extents;
 		int count;
 		int num_threads;
 
@@ -1125,8 +1147,8 @@ composite_unaligned_boxes_inplace(struct sna *sna,
 			pi.op = op;
 
 			if (sigtrap_get() == 0) {
-				count = REGION_NUM_RECTS(&clip);
-				extents = REGION_RECTS(&clip);
+				count = region_num_rects(&clip);
+				extents = region_rects(&clip);
 				while (count--) {
 					int16_t y1 = pixman_fixed_to_int(t->top);
 					uint16_t fy1 = pixman_fixed_frac(t->top);

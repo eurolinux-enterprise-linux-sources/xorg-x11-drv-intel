@@ -20,12 +20,12 @@
 
 ACLOCAL_AMFLAGS = ${ACLOCAL_FLAGS} -I m4
 
-SUBDIRS = man xvmc src tools
+SUBDIRS = man libobj xvmc src tools
 
 MAINTAINERCLEANFILES = ChangeLog INSTALL
 
 if HAVE_X11
-SUBDIRS += test
+SUBDIRS += test benchmarks
 endif
 
 .PHONY: ChangeLog INSTALL

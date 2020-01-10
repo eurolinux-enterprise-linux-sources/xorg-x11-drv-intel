@@ -15,11 +15,14 @@ enum intel_options {
 	OPTION_ACCEL_DISABLE,
 	OPTION_ACCEL_METHOD,
 	OPTION_BACKLIGHT,
+	OPTION_EDID,
 	OPTION_DRI,
+	OPTION_PRESENT,
 	OPTION_VIDEO_KEY,
 	OPTION_COLOR_KEY,
 	OPTION_TILING_2D,
 	OPTION_TILING_FB,
+	OPTION_ROTATION,
 	OPTION_VSYNC,
 	OPTION_PAGEFLIP,
 	OPTION_SWAPBUFFERS_WAIT,
@@ -49,5 +52,7 @@ enum intel_options {
 
 extern const OptionInfoRec intel_options[];
 OptionInfoPtr intel_options_get(ScrnInfoPtr scrn);
+unsigned intel_option_cast_to_unsigned(OptionInfoPtr, int id, unsigned val);
+Bool intel_option_cast_to_bool(OptionInfoPtr, int id, Bool val);
 
 #endif /* INTEL_OPTIONS_H */

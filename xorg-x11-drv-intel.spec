@@ -1,8 +1,8 @@
 %define moduledir %(pkg-config xorg-server --variable=moduledir )
 %define driverdir	%{moduledir}/drivers
 %define gputoolsdate 20130625
-#define gitdate 20120718
-#define gitrev .%{gitdate}
+%define gitdate 20151111
+%define gitrev .%{gitdate}
 
 %if 0%{?rhel} == 7
 %define rhel7 1
@@ -13,8 +13,8 @@
 
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
-Version:   2.99.911
-Release:   8%{?gitrev}%{?dist}
+Version:   2.99.917
+Release:   0.4%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -28,12 +28,14 @@ Source1:    make-intel-gpu-tools-snapshot.sh
 Source3:    intel-gpu-tools-%{gputoolsdate}.tar.bz2
 Source4:    make-git-snapshot.sh
 
-Patch20: 0001-uxa-fix-pending.patch
 Patch21: 0002-uxa-mst-support.patch
 Patch23: redhat-intel-crtc-dpms.patch
 Patch24: rhel6-uxa.patch
 Patch25: 0001-configure-Don-t-link-the-driver-against-libX11.patch
 Patch26: 0001-sna-gen8-Clamp-URB-allocations-for-GT3.patch
+Patch27: 0001-Sync-PCI-ids-with-latest-kernel-adding-SKL-GT4.patch
+Patch28: 0001-uxa-Do-not-use-RandR-if-not-available.patch
+Patch29: uxa-restore-old-bo.patch
 Patch100: igt-old-cairo.patch
 
 ExclusiveArch: %{ix86} x86_64 ia64
@@ -48,6 +50,7 @@ BuildRequires: libxcb-devel >= 1.5
 BuildRequires: xcb-util-devel
 BuildRequires: cairo-devel
 BuildRequires: glib2-devel
+BuildRequires: libxshmfence-devel
 
 Requires:  kernel >= 2.6.32-33.el6
 Requires:  libdrm >= 2.4.37
@@ -83,12 +86,13 @@ Debugging tools for Intel graphics chips
 
 %prep
 %setup -q -n xf86-video-intel-%{?gitdate:%{gitdate}}%{!?gitdate:%{dirsuffix}} -b3
-%patch20 -p1 -b .uxa-fix
-%patch21 -p1 -b .mst
+#patch21 -p1 -b .mst
 #patch23 -p1 -b .lid-hack
-%patch24 -p1 -b .uxa
-%patch25 -p1 -b .x11
-%patch26 -p1 -b .bdwgt3
+#patch24 -p1 -b .uxa
+#patch26 -p1 -b .bdwgt3
+%patch27 -p1 -b .skl
+%patch28 -p1 -b .randr-uxa
+%patch29 -p1 -b .restore
 pushd ../intel-gpu-tools-%{gputoolsdate}
 %patch100 -p1 -b .cairo
 popd
@@ -98,10 +102,12 @@ popd
 #export CFLAGS="$RPM_OPT_FLAGS -fno-omit-frame-pointer"
 %{?gitdate:autoreconf -v --install}
 
+# disable-dri3 is temporary
 %configure \
     %{?rhel7:--enable-kms-only} \
     --disable-static \
     --enable-dri \
+    --disable-dri3 \
     --enable-xvmc \
     --enable-sna \
     --with-default-accel=uxa
@@ -153,6 +159,18 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/intel_*.1*
 
 %changelog
+* Tue Mar 22 2016 Adam Jackson <ajax@redhat.com> - 2.99.917-0.4
+- Restore old buffers on RANDR configuration failure
+
+* Wed Mar 16 2016 Olivier Fourdan <ofourdan@redhat.com> - 2.99.917-0.3
+- Do not use randr in hotplug if not available (#1204087)
+
+* Thu Mar 03 2016 Adam Jackson <ajax@redhat.com> - 2.99.917-0.2
+- Add new SKL PCI IDs
+
+* Wed Nov 11 2015 Adam Jackson <ajax@redhat.com> 2.99.917-0.1
+- New snapshot for server 1.17
+
 * Tue May 05 2015 Adam Jackson <ajax@redhat.com> 2.99.911-8
 - Fix URB allocation sizing on Broadwell GT3
 

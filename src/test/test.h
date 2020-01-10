@@ -31,9 +31,11 @@ struct test {
 		Window root;
 		XShmSegmentInfo shm;
 		int max_shm_size;
+		int has_shm_pixmaps;
 		int width, height, depth;
 		XRenderPictFormat *format;
-	} real, ref;
+		enum { REF, OUT } target;
+	} out, ref;
 };
 
 void die(const char *fmt, ...);
@@ -42,8 +44,8 @@ void die(const char *fmt, ...);
 
 void test_init(struct test *test, int argc, char **argv);
 
-void test_compare(struct test *real,
-		  Drawable real_draw, XRenderPictFormat *real_format,
+void test_compare(struct test *out,
+		  Drawable out_draw, XRenderPictFormat *out_format,
 		  Drawable ref_draw, XRenderPictFormat *ref_format,
 		  int x, int y, int w, int h, const char *info);
 
@@ -52,15 +54,11 @@ int pixel_difference(uint32_t a, uint32_t b);
 
 static inline int pixel_equal(int depth, uint32_t a, uint32_t b)
 {
-	uint32_t mask;
-
-	if (depth == 32)
-		mask = 0xffffffff;
-	else
-		mask = (1 << depth) - 1;
-
-	a &= mask;
-	b &= mask;
+	if (depth != 32) {
+		uint32_t mask = (1 << depth) - 1;
+		a &= mask;
+		b &= mask;
+	}
 
 	if (a == b)
 		return 1;
@@ -109,6 +107,15 @@ static inline uint32_t color(uint8_t red, uint8_t green, uint8_t blue, uint8_t a
 	return alpha << 24 | ra >> 8 << 16 | ga >> 8 << 8 | ba >> 8;
 }
 
+static inline uint32_t xrender_color(const XRenderColor *c)
+{
+	uint32_t ra = c->red * c->alpha;
+	uint32_t ga = c->green * c->alpha;
+	uint32_t ba = c->blue * c->alpha;
+
+	return c->alpha >> 8 << 24 | ra >> 24 << 16 | ga >> 24 << 8 | ba >> 24;
+}
+
 void test_timer_start(struct test_display *t, struct timespec *tv);
 double test_timer_stop(struct test_display *t, struct timespec *tv);
 
@@ -120,7 +127,7 @@ double test_timer_stop(struct test_display *t, struct timespec *tv);
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #endif
 
+#define SETS(I) ((I) >= 12 ? 1 : 1 << (12 - (I)))
 #define REPS(I) (1 << (I))
-#define SETS(I) ((I) < 12 ? 1 << (12 - (I)) : 2)
 
 #endif

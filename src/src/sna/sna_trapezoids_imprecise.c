@@ -42,12 +42,6 @@
 #undef SAMPLES_X
 #undef SAMPLES_Y
 
-#if 0
-#define __DBG(x) LogF x
-#else
-#define __DBG(x)
-#endif
-
 /* TODO: Emit unantialiased and MSAA triangles. */
 
 #ifndef MAX
@@ -85,9 +79,9 @@ static void _assert_pixmap_contains_box(PixmapPtr pixmap, BoxPtr box, const char
 
 static void apply_damage(struct sna_composite_op *op, RegionPtr region)
 {
-	DBG(("%s: damage=%p, region=%ldx[(%d, %d), (%d, %d)]\n",
+	DBG(("%s: damage=%p, region=%dx[(%d, %d), (%d, %d)]\n",
 	     __FUNCTION__, op->damage,
-	     (long)REGION_NUM_RECTS(region),
+	     region_num_rects(region),
 	     region->extents.x1, region->extents.y1,
 	     region->extents.x2, region->extents.y2));
 
@@ -130,26 +124,26 @@ inline static void apply_damage_box(struct sna_composite_op *op, const BoxRec *b
     (i) = FAST_SAMPLES_INT(t);				\
 } while (0)
 
-#define FAST_SAMPLES_XY (2*FAST_SAMPLES_X*FAST_SAMPLES_Y) /* Unit area on the grid. */
+#define FAST_SAMPLES_XY (FAST_SAMPLES_X*FAST_SAMPLES_Y) /* Unit area on the grid. */
 #define AREA_TO_ALPHA(c)  ((c) / (float)FAST_SAMPLES_XY)
 
 struct quorem {
 	int32_t quo;
-	int32_t rem;
+	int64_t rem;
 };
 
 struct edge {
 	struct edge *next, *prev;
 
 	int dir;
-
+	int cell;
 	int height_left;
 
 	struct quorem x;
 
 	/* Advance of the current x when moving down a subsample line. */
 	struct quorem dxdy;
-	int dy;
+	int64_t dy;
 
 	/* The clipped y of the top of the edge. */
 	int ytop;
@@ -259,37 +253,6 @@ struct tor {
 
 /* Compute the floored division a/b. Assumes / and % perform symmetric
  * division. */
-inline static struct quorem
-floored_divrem(int a, int b)
-{
-	struct quorem qr;
-	assert(b>0);
-	qr.quo = a/b;
-	qr.rem = a%b;
-	if (qr.rem < 0) {
-		qr.quo -= 1;
-		qr.rem += b;
-	}
-	return qr;
-}
-
-/* Compute the floored division (x*a)/b. Assumes / and % perform symmetric
- * division. */
-static struct quorem
-floored_muldivrem(int32_t x, int32_t a, int32_t b)
-{
-	struct quorem qr;
-	int64_t xa = (int64_t)x*a;
-	assert(b>0);
-	qr.quo = xa/b;
-	qr.rem = xa%b;
-	if (qr.rem < 0) {
-		qr.quo -= 1;
-		qr.rem += b;
-	}
-	return qr;
-}
-
 /* Rewinds the cell list's cursor to the beginning.  After rewinding
  * we're good to cell_list_find() the cell any x coordinate. */
 inline static void
@@ -411,14 +374,14 @@ cell_list_add_subspan(struct cell_list *cells, int x1, int x2)
 
 	cell = cell_list_find(cells, ix1);
 	if (ix1 != ix2) {
-		cell->uncovered_area += 2*fx1;
+		cell->uncovered_area += fx1;
 		++cell->covered_height;
 
 		cell = cell_list_find(cells, ix2);
-		cell->uncovered_area -= 2*fx2;
+		cell->uncovered_area -= fx2;
 		--cell->covered_height;
 	} else
-		cell->uncovered_area += 2*(fx1-fx2);
+		cell->uncovered_area += (fx1-fx2);
 }
 
 inline static void
@@ -436,14 +399,14 @@ cell_list_add_span(struct cell_list *cells, int x1, int x2)
 
 	cell = cell_list_find(cells, ix1);
 	if (ix1 != ix2) {
-		cell->uncovered_area += 2*fx1*FAST_SAMPLES_Y;
+		cell->uncovered_area += fx1*FAST_SAMPLES_Y;
 		cell->covered_height += FAST_SAMPLES_Y;
 
 		cell = cell_list_find(cells, ix2);
-		cell->uncovered_area -= 2*fx2*FAST_SAMPLES_Y;
+		cell->uncovered_area -= fx2*FAST_SAMPLES_Y;
 		cell->covered_height -= FAST_SAMPLES_Y;
 	} else
-		cell->uncovered_area += 2*(fx1-fx2)*FAST_SAMPLES_Y;
+		cell->uncovered_area += (fx1-fx2)*FAST_SAMPLES_Y;
 }
 
 static void
@@ -503,56 +466,76 @@ _polygon_insert_edge_into_its_y_bucket(struct polygon *polygon, struct edge *e)
 
 inline static void
 polygon_add_edge(struct polygon *polygon,
-		 int x1, int x2,
-		 int y1, int y2,
-		 int top, int bottom,
-		 int dir)
+		 const xTrapezoid *t,
+		 const xLineFixed *edge,
+		 int dir, int dx, int dy)
 {
 	struct edge *e = &polygon->edges[polygon->num_edges];
-	int dx = x2 - x1;
-	int dy = y2 - y1;
 	int ytop, ybot;
-	int ymin = polygon->ymin;
-	int ymax = polygon->ymax;
 
-	__DBG(("%s: edge=(%d [%d.%d], %d [%d.%d]), (%d [%d.%d], %d [%d.%d]), top=%d [%d.%d], bottom=%d [%d.%d], dir=%d\n",
-	       __FUNCTION__,
-	       x1, FAST_SAMPLES_INT(x1), FAST_SAMPLES_FRAC(x1),
-	       y1, FAST_SAMPLES_INT(y1), FAST_SAMPLES_FRAC(y1),
-	       x2, FAST_SAMPLES_INT(x2), FAST_SAMPLES_FRAC(x2),
-	       y2, FAST_SAMPLES_INT(y2), FAST_SAMPLES_FRAC(y2),
-	       top, FAST_SAMPLES_INT(top), FAST_SAMPLES_FRAC(top),
-	       bottom, FAST_SAMPLES_INT(bottom), FAST_SAMPLES_FRAC(bottom),
-	       dir));
-	assert (dy > 0);
+	assert(t->bottom > t->top);
+	assert(edge->p2.y > edge->p1.y);
 
-	e->dy = dy;
 	e->dir = dir;
 
-	ytop = top >= ymin ? top : ymin;
-	ybot = bottom <= ymax ? bottom : ymax;
+	ytop = pixman_fixed_to_fast(t->top) + dy;
+	if (ytop < polygon->ymin)
+		ytop = polygon->ymin;
+
+	ybot = pixman_fixed_to_fast(t->bottom) + dy;
+	if (ybot > polygon->ymax)
+		ybot = polygon->ymax;
+
 	e->ytop = ytop;
 	e->height_left = ybot - ytop;
 	if (e->height_left <= 0)
 		return;
 
-	if (dx == 0) {
-		e->x.quo = x1;
+	if (pixman_fixed_to_fast(edge->p1.x) == pixman_fixed_to_fast(edge->p2.x)) {
+		e->cell = e->x.quo = pixman_fixed_to_fast(edge->p1.x) + dx;
 		e->x.rem = 0;
-		e->dy = 0;
 		e->dxdy.quo = 0;
 		e->dxdy.rem = 0;
+		e->dy = 0;
 	} else {
-		e->dxdy = floored_divrem(dx, dy);
-		if (ytop == y1) {
-			e->x.quo = x1;
-			e->x.rem = 0;
-		} else {
-			e->x = floored_muldivrem(ytop - y1, dx, dy);
-			e->x.quo += x1;
+		int64_t Ex, Ey, tmp;
+
+		Ex = ((int64_t)edge->p2.x - edge->p1.x) * FAST_SAMPLES_X;
+		Ey = ((int64_t)edge->p2.y - edge->p1.y) * FAST_SAMPLES_Y * (2 << 16);
+		assert(Ey > 0);
+
+		e->dxdy.quo = Ex * (2 << 16) / Ey;
+		e->dxdy.rem = Ex * (2 << 16) % Ey;
+
+		tmp = (int64_t)(2 * (ytop - dy) + 1) << 16;
+		tmp -= (int64_t)edge->p1.y * FAST_SAMPLES_Y * 2;
+		tmp *= Ex;
+		e->x.quo = tmp / Ey;
+		e->x.rem = tmp % Ey;
+
+		tmp = (int64_t)edge->p1.x * FAST_SAMPLES_X;
+		e->x.quo += tmp / (1 << 16) + dx;
+		tmp &= (1 << 16) - 1;
+		if (tmp) {
+			if (Ey < INT64_MAX >> 16)
+				tmp = (tmp * Ey) / (1 << 16);
+			else /* Handle overflow by losing precision */
+				tmp = tmp * (Ey / (1 << 16));
+			e->x.rem += tmp;
 		}
+
+		if (e->x.rem < 0) {
+			--e->x.quo;
+			e->x.rem += Ey;
+		} else if (e->x.rem >= Ey) {
+			++e->x.quo;
+			e->x.rem -= Ey;
+		}
+		assert(e->x.rem >= 0 && e->x.rem < Ey);
+
+		e->cell = e->x.quo + (e->x.rem >= Ey/2);
+		e->dy = Ey;
 	}
-	e->x.rem -= dy; /* Bias the remainder for faster edge advancement. */
 
 	_polygon_insert_edge_into_its_y_bucket(polygon, e);
 	polygon->num_edges++;
@@ -561,25 +544,21 @@ polygon_add_edge(struct polygon *polygon,
 inline static void
 polygon_add_line(struct polygon *polygon,
 		 const xPointFixed *p1,
-		 const xPointFixed *p2)
+		 const xPointFixed *p2,
+		 int dx, int dy)
 {
 	struct edge *e = &polygon->edges[polygon->num_edges];
-	int dx = p2->x - p1->x;
-	int dy = p2->y - p1->y;
 	int top, bot;
 
-	if (dy == 0)
+	if (p1->y == p2->y)
 		return;
 
 	__DBG(("%s: line=(%d, %d), (%d, %d)\n",
 	       __FUNCTION__, (int)p1->x, (int)p1->y, (int)p2->x, (int)p2->y));
 
 	e->dir = 1;
-	if (dy < 0) {
+	if (p2->y < p1->y) {
 		const xPointFixed *t;
-
-		dx = -dx;
-		dy = -dy;
 
 		e->dir = -1;
 
@@ -587,11 +566,15 @@ polygon_add_line(struct polygon *polygon,
 		p1 = p2;
 		p2 = t;
 	}
-	assert (dy > 0);
-	e->dy = dy;
 
-	top = MAX(p1->y, polygon->ymin);
-	bot = MIN(p2->y, polygon->ymax);
+	top = pixman_fixed_to_fast(p1->y) + dy;
+	if (top < polygon->ymin)
+		top = polygon->ymin;
+
+	bot = pixman_fixed_to_fast(p2->y) + dy;
+	if (bot > polygon->ymax)
+		bot = polygon->ymax;
+
 	if (bot <= top)
 		return;
 
@@ -600,22 +583,43 @@ polygon_add_line(struct polygon *polygon,
 	if (e->height_left <= 0)
 		return;
 
-	if (dx == 0) {
-		e->x.quo = p1->x;
-		e->x.rem = -dy;
+	__DBG(("%s: edge height=%d\n", __FUNCTION__, e->dir * e->height_left));
+
+	if (pixman_fixed_to_fast(p1->x) == pixman_fixed_to_fast(p2->x)) {
+		e->cell = e->x.quo = pixman_fixed_to_fast(p1->x) + dx;
+		e->x.rem = 0;
 		e->dxdy.quo = 0;
 		e->dxdy.rem = 0;
 		e->dy = 0;
 	} else {
-		e->dxdy = floored_divrem(dx, dy);
-		if (top == p1->y) {
-			e->x.quo = p1->x;
-			e->x.rem = -dy;
-		} else {
-			e->x = floored_muldivrem(top - p1->y, dx, dy);
-			e->x.quo += p1->x;
-			e->x.rem -= dy;
+		int64_t Ex, Ey, tmp;
+
+		Ex = ((int64_t)p2->x - p1->x) * FAST_SAMPLES_X;
+		Ey = ((int64_t)p2->y - p1->y) * FAST_SAMPLES_Y * (2 << 16);
+
+		e->dxdy.quo = Ex * (2 << 16) / Ey;
+		e->dxdy.rem = Ex * (2 << 16) % Ey;
+
+		tmp = (int64_t)(2 * (top - dy) + 1) << 16;
+		tmp -= (int64_t)p1->y * FAST_SAMPLES_Y * 2;
+		tmp *= Ex;
+		e->x.quo = tmp / Ey;
+		e->x.rem = tmp % Ey;
+
+		tmp = (int64_t)p1->x * FAST_SAMPLES_X;
+		e->x.quo += tmp / (1 << 16) + dx;
+		e->x.rem += ((tmp & ((1 << 16) - 1)) * Ey) / (1 << 16);
+
+		if (e->x.rem < 0) {
+			--e->x.quo;
+			e->x.rem += Ey;
+		} else if (e->x.rem >= Ey) {
+			++e->x.quo;
+			e->x.rem -= Ey;
 		}
+
+		e->cell = e->x.quo + (e->x.rem >= Ey/2);
+		e->dy = Ey;
 	}
 
 	if (polygon->num_edges > 0) {
@@ -631,6 +635,7 @@ polygon_add_line(struct polygon *polygon,
 			unsigned ix = EDGE_Y_BUCKET_INDEX(e->ytop,
 							  polygon->ymin);
 			polygon->y_buckets[ix] = prev->next;
+			polygon->num_edges--;
 			return;
 		}
 	}
@@ -643,13 +648,13 @@ static void
 active_list_reset(struct active_list *active)
 {
 	active->head.height_left = INT_MAX;
-	active->head.x.quo = INT_MIN;
+	active->head.cell = INT_MIN;
 	active->head.dy = 0;
 	active->head.prev = NULL;
 	active->head.next = &active->tail;
 	active->tail.prev = &active->head;
 	active->tail.next = NULL;
-	active->tail.x.quo = INT_MAX;
+	active->tail.cell = INT_MAX;
 	active->tail.height_left = INT_MAX;
 	active->tail.dy = 0;
 }
@@ -665,7 +670,7 @@ merge_sorted_edges(struct edge *head_a, struct edge *head_b)
 
 	prev = head_a->prev;
 	next = &head;
-	if (head_a->x.quo <= head_b->x.quo) {
+	if (head_a->cell <= head_b->cell) {
 		head = head_a;
 	} else {
 		head = head_b;
@@ -674,8 +679,8 @@ merge_sorted_edges(struct edge *head_a, struct edge *head_b)
 	}
 
 	do {
-		x = head_b->x.quo;
-		while (head_a != NULL && head_a->x.quo <= x) {
+		x = head_b->cell;
+		while (head_a != NULL && head_a->cell <= x) {
 			prev = head_a;
 			next = &head_a->next;
 			head_a = head_a->next;
@@ -687,8 +692,8 @@ merge_sorted_edges(struct edge *head_a, struct edge *head_b)
 			return head;
 
 start_with_b:
-		x = head_a->x.quo;
-		while (head_b != NULL && head_b->x.quo <= x) {
+		x = head_a->cell;
+		while (head_b != NULL && head_b->cell <= x) {
 			prev = head_b;
 			next = &head_b->next;
 			head_b = head_b->next;
@@ -716,7 +721,7 @@ sort_edges(struct edge  *list,
 	}
 
 	remaining = head_other->next;
-	if (list->x.quo <= head_other->x.quo) {
+	if (list->cell <= head_other->cell) {
 		*head_out = list;
 		head_other->next = NULL;
 	} else {
@@ -740,12 +745,14 @@ static struct edge *filter(struct edge *edges)
 	struct edge *e;
 
 	e = edges;
-	do {
+	while (e->next) {
 		struct edge *n = e->next;
 		if (e->dir == -n->dir &&
 		    e->height_left == n->height_left &&
-		    *(uint64_t *)&e->x == *(uint64_t *)&n->x &&
-		    *(uint64_t *)&e->dxdy == *(uint64_t *)&n->dxdy) {
+		    &e->x.quo == &n->x.quo &&
+		    &e->x.rem == &n->x.rem &&
+		    &e->dxdy.quo == &n->dxdy.quo &&
+		    &e->dxdy.rem == &n->dxdy.rem) {
 			if (e->prev)
 				e->prev->next = n->next;
 			else
@@ -754,11 +761,10 @@ static struct edge *filter(struct edge *edges)
 				n->next->prev = e->prev;
 			else
 				break;
-
 			e = n->next;
 		} else
-			e = e->next;
-	} while (e->next);
+			e = n;
+	}
 
 	return edges;
 }
@@ -801,21 +807,30 @@ merge_edges(struct active_list *active, struct edge *edges)
 	active->head.next = merge_unsorted_edges(active->head.next, edges);
 }
 
-inline static void
+inline static int
 fill_buckets(struct active_list *active,
 	     struct edge *edge,
 	     struct edge **buckets)
 {
+	int ymax = 0;
+
 	while (edge) {
+		int y = edge->ytop & (FAST_SAMPLES_Y-1);
 		struct edge *next = edge->next;
-		struct edge **b = &buckets[edge->ytop & (FAST_SAMPLES_Y-1)];
+		struct edge **b = &buckets[y];
+		__DBG(("%s: ytop %d -> bucket %d\n", __FUNCTION__,
+		       edge->ytop, y));
 		if (*b)
 			(*b)->prev = edge;
 		edge->next = *b;
 		edge->prev = NULL;
 		*b = edge;
 		edge = next;
+		if (y > ymax)
+			ymax = y;
 	}
+
+	return ymax;
 }
 
 inline static void
@@ -823,7 +838,7 @@ nonzero_subrow(struct active_list *active, struct cell_list *coverages)
 {
 	struct edge *edge = active->head.next;
 	int prev_x = INT_MIN;
-	int winding = 0, xstart = edge->x.quo;
+	int winding = 0, xstart = edge->cell;
 
 	cell_list_rewind(coverages);
 
@@ -831,10 +846,9 @@ nonzero_subrow(struct active_list *active, struct cell_list *coverages)
 		struct edge *next = edge->next;
 
 		winding += edge->dir;
-		if (0 == winding && edge->next->x.quo != edge->x.quo) {
-			cell_list_add_subspan(coverages,
-					      xstart, edge->x.quo);
-			xstart = edge->next->x.quo;
+		if (0 == winding && edge->next->cell != edge->cell) {
+			cell_list_add_subspan(coverages, xstart, edge->cell);
+			xstart = edge->next->cell;
 		}
 
 		assert(edge->height_left > 0);
@@ -842,25 +856,29 @@ nonzero_subrow(struct active_list *active, struct cell_list *coverages)
 			if (edge->dy) {
 				edge->x.quo += edge->dxdy.quo;
 				edge->x.rem += edge->dxdy.rem;
-				if (edge->x.rem >= 0) {
+				if (edge->x.rem < 0) {
+					--edge->x.quo;
+					edge->x.rem += edge->dy;
+				} else if (edge->x.rem >= edge->dy) {
 					++edge->x.quo;
 					edge->x.rem -= edge->dy;
 				}
+				edge->cell = edge->x.quo + (edge->x.rem >= edge->dy/2);
 			}
 
-			if (edge->x.quo < prev_x) {
+			if (edge->cell < prev_x) {
 				struct edge *pos = edge->prev;
 				pos->next = next;
 				next->prev = pos;
-				do {
+				do
 					pos = pos->prev;
-				} while (edge->x.quo < pos->x.quo);
+				while (edge->cell < pos->cell);
 				pos->next->prev = edge;
 				edge->next = pos->next;
 				edge->prev = pos;
 				pos->next = edge;
 			} else
-				prev_x = edge->x.quo;
+				prev_x = edge->cell;
 		} else {
 			edge->prev->next = next;
 			next->prev = edge->prev;
@@ -902,7 +920,7 @@ nonzero_row(struct active_list *active, struct cell_list *coverages)
 			right = right->next;
 		} while (1);
 
-		cell_list_add_span(coverages, left->x.quo, right->x.quo);
+		cell_list_add_span(coverages, left->cell, right->cell);
 		left = right->next;
 	}
 }
@@ -940,16 +958,22 @@ tor_init(struct tor *converter, const BoxRec *box, int num_edges)
 }
 
 static void
-tor_add_edge(struct tor *converter,
-	     const xTrapezoid *t,
-	     const xLineFixed *edge,
-	     int dir)
+tor_add_trapezoid(struct tor *tor,
+		  const xTrapezoid *t,
+		  int dx, int dy)
 {
-	polygon_add_edge(converter->polygon,
-			 edge->p1.x, edge->p2.x,
-			 edge->p1.y, edge->p2.y,
-			 t->top, t->bottom,
-			 dir);
+	if (!xTrapezoidValid(t)) {
+		__DBG(("%s: skipping invalid trapezoid: top=%d, bottom=%d, left=(%d, %d), (%d, %d), right=(%d, %d), (%d, %d)\n",
+		       __FUNCTION__,
+		       t->top, t->bottom,
+		       t->left.p1.x, t->left.p1.y,
+		       t->left.p2.x, t->left.p2.y,
+		       t->right.p1.x, t->right.p1.y,
+		       t->right.p2.x, t->right.p2.y));
+		return;
+	}
+	polygon_add_edge(tor->polygon, t, &t->left, 1, dx, dy);
+	polygon_add_edge(tor->polygon, t, &t->right, -1, dx, dy);
 }
 
 static void
@@ -1008,10 +1032,10 @@ tor_blt_span_clipped(struct sna *sna,
 
 	pixman_region_init_rects(&region, box, 1);
 	RegionIntersect(&region, &region, clip);
-	if (REGION_NUM_RECTS(&region)) {
+	if (region_num_rects(&region)) {
 		op->boxes(sna, op,
-			  REGION_RECTS(&region),
-			  REGION_NUM_RECTS(&region),
+			  region_rects(&region),
+			  region_num_rects(&region),
 			  opacity);
 		apply_damage(&op->base, &region);
 	}
@@ -1090,16 +1114,16 @@ tor_blt(struct sna *sna,
 	box.x1 = converter->extents.x1;
 
 	/* Form the spans from the coverages and areas. */
-	cover = cells->head.covered_height*FAST_SAMPLES_X*2;
+	cover = cells->head.covered_height*FAST_SAMPLES_X;
 	assert(cover >= 0);
 	for (cell = cells->head.next; cell != &cells->tail; cell = cell->next) {
 		int x = cell->x;
 
 		assert(x >= converter->extents.x1);
 		assert(x < converter->extents.x2);
-		__DBG(("%s: cell=(%d, %d, %d), cover=%d, max=%d\n", __FUNCTION__,
+		__DBG(("%s: cell=(%d, %d, %d), cover=%d\n", __FUNCTION__,
 		       cell->x, cell->covered_height, cell->uncovered_area,
-		       cover, xmax));
+		       cover));
 
 		if (cell->covered_height || cell->uncovered_area) {
 			box.x2 = x;
@@ -1112,7 +1136,7 @@ tor_blt(struct sna *sna,
 				span(sna, op, clip, &box, cover);
 			}
 			box.x1 = box.x2;
-			cover += cell->covered_height*FAST_SAMPLES_X*2;
+			cover += cell->covered_height*FAST_SAMPLES_X;
 		}
 
 		if (cell->uncovered_area) {
@@ -1169,7 +1193,11 @@ tor_render(struct sna *sna,
 
 		/* Determine if we can ignore this row or use the full pixel
 		 * stepper. */
-		if (polygon->y_buckets[i] == NULL) {
+		if (fill_buckets(active, polygon->y_buckets[i], buckets) == 0) {
+			if (buckets[0]) {
+				merge_edges(active, buckets[0]);
+				buckets[0] = NULL;
+			}
 			if (active->head.next == &active->tail) {
 				for (; polygon->y_buckets[j] == NULL; j++)
 					;
@@ -1192,9 +1220,9 @@ tor_render(struct sna *sna,
 			do_full_step = can_full_step(active);
 		}
 
-		__DBG(("%s: y=%d [%d], do_full_step=%d, new edges=%d, min_height=%d, vertical=%d\n",
+		__DBG(("%s: y=%d-%d, do_full_step=%d, new edges=%d\n",
 		       __FUNCTION__,
-		       i, i+ymin, do_full_step,
+		       i, j, do_full_step,
 		       polygon->y_buckets[i] != NULL));
 		if (do_full_step) {
 			nonzero_row(active, coverages);
@@ -1212,8 +1240,6 @@ tor_render(struct sna *sna,
 			       __FUNCTION__,  i, j));
 		} else {
 			int suby;
-
-			fill_buckets(active, polygon->y_buckets[i], buckets);
 
 			/* Subsample this row. */
 			for (suby = 0; suby < FAST_SAMPLES_Y; suby++) {
@@ -1260,27 +1286,27 @@ inplace_row(struct active_list *active, uint8_t *row, int width)
 			}
 
 			winding += right->dir;
-			if (0 == winding && right->x.quo != right->next->x.quo)
+			if (0 == winding && right->cell != right->next->cell)
 				break;
 
 			right = right->next;
 		} while (1);
 
-		if (left->x.quo < 0) {
+		if (left->cell < 0) {
 			lix = lfx = 0;
-		} else if (left->x.quo >= width * FAST_SAMPLES_X) {
+		} else if (left->cell >= width * FAST_SAMPLES_X) {
 			lix = width;
 			lfx = 0;
 		} else
-			FAST_SAMPLES_X_TO_INT_FRAC(left->x.quo, lix, lfx);
+			FAST_SAMPLES_X_TO_INT_FRAC(left->cell, lix, lfx);
 
-		if (right->x.quo < 0) {
+		if (right->cell < 0) {
 			rix = rfx = 0;
-		} else if (right->x.quo >= width * FAST_SAMPLES_X) {
+		} else if (right->cell >= width * FAST_SAMPLES_X) {
 			rix = width;
 			rfx = 0;
 		} else
-			FAST_SAMPLES_X_TO_INT_FRAC(right->x.quo, rix, rfx);
+			FAST_SAMPLES_X_TO_INT_FRAC(right->cell, rix, rfx);
 		if (lix == rix) {
 			if (rfx != lfx) {
 				assert(lix < width);
@@ -1358,8 +1384,8 @@ inplace_subrow(struct active_list *active, int8_t *row,
 
 		winding += edge->dir;
 		if (0 == winding) {
-			if (edge->next->x.quo != edge->x.quo) {
-				if (edge->x.quo <= xstart) {
+			if (edge->next->cell != edge->cell) {
+				if (edge->cell <= xstart) {
 					xstart = INT_MIN;
 				} else  {
 					int fx;
@@ -1375,7 +1401,7 @@ inplace_subrow(struct active_list *active, int8_t *row,
 							row[ix] += fx;
 					}
 
-					xstart = edge->x.quo;
+					xstart = edge->cell;
 					if (xstart < FAST_SAMPLES_X * width) {
 						FAST_SAMPLES_X_TO_INT_FRAC(xstart, ix, fx);
 						row[ix] -= FAST_SAMPLES_X - fx;
@@ -1391,7 +1417,7 @@ inplace_subrow(struct active_list *active, int8_t *row,
 				}
 			}
 		} else if (xstart < 0) {
-			xstart = MAX(edge->x.quo, 0);
+			xstart = MAX(edge->cell, 0);
 		}
 
 		assert(edge->height_left > 0);
@@ -1399,25 +1425,29 @@ inplace_subrow(struct active_list *active, int8_t *row,
 			if (edge->dy) {
 				edge->x.quo += edge->dxdy.quo;
 				edge->x.rem += edge->dxdy.rem;
-				if (edge->x.rem >= 0) {
+				if (edge->x.rem < 0) {
+					--edge->x.quo;
+					edge->x.rem += edge->dy;
+				} else if (edge->x.rem >= 0) {
 					++edge->x.quo;
 					edge->x.rem -= edge->dy;
 				}
+				edge->cell = edge->x.quo + (edge->x.rem >= edge->dy/2);
 			}
 
-			if (edge->x.quo < prev_x) {
+			if (edge->cell < prev_x) {
 				struct edge *pos = edge->prev;
 				pos->next = next;
 				next->prev = pos;
-				do {
+				do
 					pos = pos->prev;
-				} while (edge->x.quo < pos->x.quo);
+				while (edge->cell < pos->cell);
 				pos->next->prev = edge;
 				edge->next = pos->next;
 				edge->prev = pos;
 				pos->next = edge;
 			} else
-				prev_x = edge->x.quo;
+				prev_x = edge->cell;
 		} else {
 			edge->prev->next = next;
 			next->prev = edge->prev;
@@ -1441,7 +1471,7 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 		buf += 4;
 
 		if (dw == 0) {
-			v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+			v = cover * 256 / FAST_SAMPLES_XY;
 			v -= v >> 8;
 			v |= v << 8;
 			dw = v | v << 16;
@@ -1449,7 +1479,7 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 			cover += (int8_t)(dw & 0xff);
 			if (cover) {
 				assert(cover > 0);
-				v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+				v = cover * 256 / FAST_SAMPLES_XY;
 				v -= v >> 8;
 				dw >>= 8;
 				dw |= v << 24;
@@ -1459,7 +1489,7 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 			cover += (int8_t)(dw & 0xff);
 			if (cover) {
 				assert(cover > 0);
-				v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+				v = cover * 256 / FAST_SAMPLES_XY;
 				v -= v >> 8;
 				dw >>= 8;
 				dw |= v << 24;
@@ -1469,7 +1499,7 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 			cover += (int8_t)(dw & 0xff);
 			if (cover) {
 				assert(cover > 0);
-				v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+				v = cover * 256 / FAST_SAMPLES_XY;
 				v -= v >> 8;
 				dw >>= 8;
 				dw |= v << 24;
@@ -1479,7 +1509,7 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 			cover += (int8_t)(dw & 0xff);
 			if (cover) {
 				assert(cover > 0);
-				v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+				v = cover * 256 / FAST_SAMPLES_XY;
 				v -= v >> 8;
 				dw >>= 8;
 				dw |= v << 24;
@@ -1498,9 +1528,18 @@ inplace_end_subrows(struct active_list *active, uint8_t *row,
 		cover += *buf++;
 		assert(cover >= 0);
 
-		v = cover * 256 / (FAST_SAMPLES_X * FAST_SAMPLES_Y);
+		v = cover * 256 / FAST_SAMPLES_XY;
 		v -= v >> 8;
 		*row++ = v;
+	}
+}
+
+static void
+convert_mono(uint8_t *ptr, int w)
+{
+	while (w--) {
+		*ptr = 0xff * (*ptr >= 0xf0);
+		ptr++;
 	}
 }
 
@@ -1516,7 +1555,6 @@ tor_inplace(struct tor *converter, PixmapPtr scratch, int mono, uint8_t *buf)
 	int width = scratch->drawable.width;
 
 	__DBG(("%s: mono=%d, buf?=%d\n", __FUNCTION__, mono, buf != NULL));
-	assert(!mono);
 	assert(converter->extents.y1 == 0);
 	assert(converter->extents.x1 == 0);
 	assert(scratch->drawable.depth == 8);
@@ -1530,7 +1568,11 @@ tor_inplace(struct tor *converter, PixmapPtr scratch, int mono, uint8_t *buf)
 
 		/* Determine if we can ignore this row or use the full pixel
 		 * stepper. */
-		if (!polygon->y_buckets[i]) {
+		if (fill_buckets(active, polygon->y_buckets[i], buckets) == 0) {
+			if (buckets[0]) {
+				merge_edges(active, buckets[0]);
+				buckets[0] = NULL;
+			}
 			if (active->head.next == &active->tail) {
 				for (; !polygon->y_buckets[j]; j++)
 					;
@@ -1552,6 +1594,8 @@ tor_inplace(struct tor *converter, PixmapPtr scratch, int mono, uint8_t *buf)
 		if (do_full_step) {
 			memset(ptr, 0, width);
 			inplace_row(active, ptr, width);
+			if (mono)
+				convert_mono(ptr, width);
 			if (row != ptr)
 				memcpy(row, ptr, width);
 
@@ -1570,8 +1614,6 @@ tor_inplace(struct tor *converter, PixmapPtr scratch, int mono, uint8_t *buf)
 		} else {
 			int min = width, max = 0, suby;
 
-			fill_buckets(active, polygon->y_buckets[i], buckets);
-
 			/* Subsample this row. */
 			memset(ptr, 0, width);
 			for (suby = 0; suby < FAST_SAMPLES_Y; suby++) {
@@ -1584,8 +1626,11 @@ tor_inplace(struct tor *converter, PixmapPtr scratch, int mono, uint8_t *buf)
 			}
 			assert(min >= 0 && max <= width);
 			memset(row, 0, min);
-			if (max > min)
+			if (max > min) {
 				inplace_end_subrows(active, row+min, (int8_t*)ptr+min, max-min);
+				if (mono)
+					convert_mono(row+min, max-min);
+			}
 			if (max < width)
 				memset(row+max, 0, width-max);
 		}
@@ -1604,39 +1649,6 @@ static int operator_is_bounded(uint8_t op)
 	default:
 		return false;
 	}
-}
-
-static inline bool
-project_trapezoid_onto_grid(const xTrapezoid *in,
-			    int dx, int dy,
-			    xTrapezoid *out)
-{
-	__DBG(("%s: in: L:(%d, %d), (%d, %d); R:(%d, %d), (%d, %d), [%d, %d]\n",
-	       __FUNCTION__,
-	       in->left.p1.x, in->left.p1.y, in->left.p2.x, in->left.p2.y,
-	       in->right.p1.x, in->right.p1.y, in->right.p2.x, in->right.p2.y,
-	       in->top, in->bottom));
-
-	out->left.p1.x = dx + pixman_fixed_to_fast(in->left.p1.x);
-	out->left.p1.y = dy + pixman_fixed_to_fast(in->left.p1.y);
-	out->left.p2.x = dx + pixman_fixed_to_fast(in->left.p2.x);
-	out->left.p2.y = dy + pixman_fixed_to_fast(in->left.p2.y);
-
-	out->right.p1.x = dx + pixman_fixed_to_fast(in->right.p1.x);
-	out->right.p1.y = dy + pixman_fixed_to_fast(in->right.p1.y);
-	out->right.p2.x = dx + pixman_fixed_to_fast(in->right.p2.x);
-	out->right.p2.y = dy + pixman_fixed_to_fast(in->right.p2.y);
-
-	out->top = dy + pixman_fixed_to_fast(in->top);
-	out->bottom = dy + pixman_fixed_to_fast(in->bottom);
-
-	__DBG(("%s: out: L:(%d, %d), (%d, %d); R:(%d, %d), (%d, %d), [%d, %d]\n",
-	       __FUNCTION__,
-	       out->left.p1.x, out->left.p1.y, out->left.p2.x, out->left.p2.y,
-	       out->right.p1.x, out->right.p1.y, out->right.p2.x, out->right.p2.y,
-	       out->top, out->bottom));
-
-	return xTrapezoidValid(out);
 }
 
 static span_func_t
@@ -1685,31 +1697,27 @@ struct span_thread {
 #define SPAN_THREAD_MAX_BOXES (8192/sizeof(struct sna_opacity_box))
 struct span_thread_boxes {
 	const struct sna_composite_spans_op *op;
+	const BoxRec *clip_start, *clip_end;
 	int num_boxes;
 	struct sna_opacity_box boxes[SPAN_THREAD_MAX_BOXES];
 };
 
-static void span_thread_add_boxes(struct sna *sna, void *data,
-				  const BoxRec *box, int count, float alpha)
+static void span_thread_add_box(struct sna *sna, void *data,
+				const BoxRec *box, float alpha)
 {
 	struct span_thread_boxes *b = data;
 
-	__DBG(("%s: adding %d boxes with alpha=%f\n",
-	       __FUNCTION__, count, alpha));
+	__DBG(("%s: adding box with alpha=%f\n", __FUNCTION__, alpha));
 
-	assert(count > 0 && count <= SPAN_THREAD_MAX_BOXES);
-	if (unlikely(b->num_boxes + count > SPAN_THREAD_MAX_BOXES)) {
-		DBG(("%s: flushing %d boxes, adding %d\n", __FUNCTION__, b->num_boxes, count));
-		assert(b->num_boxes <= SPAN_THREAD_MAX_BOXES);
+	if (unlikely(b->num_boxes == SPAN_THREAD_MAX_BOXES)) {
+		DBG(("%s: flushing %d boxes\n", __FUNCTION__, b->num_boxes));
 		b->op->thread_boxes(sna, b->op, b->boxes, b->num_boxes);
 		b->num_boxes = 0;
 	}
 
-	do {
-		b->boxes[b->num_boxes].box = *box++;
-		b->boxes[b->num_boxes].alpha = alpha;
-		b->num_boxes++;
-	} while (--count);
+	b->boxes[b->num_boxes].box = *box++;
+	b->boxes[b->num_boxes].alpha = alpha;
+	b->num_boxes++;
 	assert(b->num_boxes <= SPAN_THREAD_MAX_BOXES);
 }
 
@@ -1720,8 +1728,22 @@ span_thread_box(struct sna *sna,
 		const BoxRec *box,
 		int coverage)
 {
+	struct span_thread_boxes *b = (struct span_thread_boxes *)op;
+
 	__DBG(("%s: %d -> %d @ %d\n", __FUNCTION__, box->x1, box->x2, coverage));
-	span_thread_add_boxes(sna, op, box, 1, AREA_TO_ALPHA(coverage));
+	if (b->num_boxes) {
+		struct sna_opacity_box *bb = &b->boxes[b->num_boxes-1];
+		if (bb->box.x1 == box->x1 &&
+		    bb->box.x2 == box->x2 &&
+		    bb->box.y2 == box->y1 &&
+		    bb->alpha == AREA_TO_ALPHA(coverage)) {
+			bb->box.y2 = box->y2;
+			__DBG(("%s: contracted double row: %d -> %d\n", __func__, bb->box.y1, bb->box.y2));
+			return;
+		}
+	}
+
+	span_thread_add_box(sna, op, box, AREA_TO_ALPHA(coverage));
 }
 
 static void
@@ -1731,20 +1753,28 @@ span_thread_clipped_box(struct sna *sna,
 			const BoxRec *box,
 			int coverage)
 {
-	pixman_region16_t region;
+	struct span_thread_boxes *b = (struct span_thread_boxes *)op;
+	const BoxRec *c;
 
 	__DBG(("%s: %d -> %d @ %f\n", __FUNCTION__, box->x1, box->x2,
 	       AREA_TO_ALPHA(coverage)));
 
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	if (REGION_NUM_RECTS(&region)) {
-		span_thread_add_boxes(sna, op,
-				      REGION_RECTS(&region),
-				      REGION_NUM_RECTS(&region),
-				      AREA_TO_ALPHA(coverage));
+	b->clip_start =
+		find_clip_box_for_y(b->clip_start, b->clip_end, box->y1);
+
+	c = b->clip_start;
+	while (c != b->clip_end) {
+		BoxRec clipped;
+
+		if (box->y2 <= c->y1)
+			break;
+
+		clipped = *box;
+		if (!box_intersect(&clipped, c++))
+			continue;
+
+		span_thread_add_box(sna, op, &clipped, AREA_TO_ALPHA(coverage));
 	}
-	pixman_region_fini(&region);
 }
 
 static span_func_t
@@ -1775,6 +1805,16 @@ thread_choose_span(struct sna_composite_spans_op *tmp,
 	return span;
 }
 
+inline static void
+span_thread_boxes_init(struct span_thread_boxes *boxes,
+		       const struct sna_composite_spans_op *op,
+		       const RegionRec *clip)
+{
+	boxes->op = op;
+	region_get_boxes(clip, &boxes->clip_start, &boxes->clip_end);
+	boxes->num_boxes = 0;
+}
+
 static void
 span_thread(void *arg)
 {
@@ -1787,23 +1827,16 @@ span_thread(void *arg)
 	if (!tor_init(&tor, &thread->extents, 2*thread->ntrap))
 		return;
 
-	boxes.op = thread->op;
-	boxes.num_boxes = 0;
+	span_thread_boxes_init(&boxes, thread->op, thread->clip);
 
 	y1 = thread->extents.y1 - thread->draw_y;
 	y2 = thread->extents.y2 - thread->draw_y;
 	for (n = thread->ntrap, t = thread->traps; n--; t++) {
-		xTrapezoid tt;
-
 		if (pixman_fixed_integer_floor(t->top) >= y2 ||
 		    pixman_fixed_integer_ceil(t->bottom) <= y1)
 			continue;
 
-		if (!project_trapezoid_onto_grid(t, thread->dx, thread->dy, &tt))
-			continue;
-
-		tor_add_edge(&tor, &tt, &tt.left, 1);
-		tor_add_edge(&tor, &tt, &tt.right, -1);
+		tor_add_trapezoid(&tor, t, thread->dx, thread->dy);
 	}
 
 	tor_render(thread->sna, &tor,
@@ -1939,17 +1972,11 @@ imprecise_trapezoid_span_converter(struct sna *sna,
 			goto skip;
 
 		for (n = 0; n < ntrap; n++) {
-			xTrapezoid t;
-
 			if (pixman_fixed_integer_floor(traps[n].top) + dst->pDrawable->y >= clip.extents.y2 ||
 			    pixman_fixed_integer_ceil(traps[n].bottom) + dst->pDrawable->y <= clip.extents.y1)
 				continue;
 
-			if (!project_trapezoid_onto_grid(&traps[n], dx, dy, &t))
-				continue;
-
-			tor_add_edge(&tor, &t, &t.left, 1);
-			tor_add_edge(&tor, &t, &t.right, -1);
+			tor_add_trapezoid(&tor, &traps[n], dx, dy);
 		}
 
 		tor_render(sna, &tor, &tmp, &clip,
@@ -2121,17 +2148,11 @@ imprecise_trapezoid_mask_converter(CARD8 op, PicturePtr src, PicturePtr dst,
 	}
 
 	for (n = 0; n < ntrap; n++) {
-		xTrapezoid t;
-
 		if (pixman_fixed_to_int(traps[n].top) - dst_y >= extents.y2 ||
 		    pixman_fixed_to_int(traps[n].bottom) - dst_y < 0)
 			continue;
 
-		if (!project_trapezoid_onto_grid(&traps[n], dx, dy, &t))
-			continue;
-
-		tor_add_edge(&tor, &t, &t.left, 1);
-		tor_add_edge(&tor, &t, &t.right, -1);
+		tor_add_trapezoid(&tor, &traps[n], dx, dy);
 	}
 
 	if (extents.x2 <= TOR_INPLACE_SIZE) {
@@ -2206,6 +2227,52 @@ static void _tor_blt_src(struct inplace *in, const BoxRec *box, uint8_t v)
 	} while (--h);
 }
 
+struct clipped_span {
+	span_func_t span;
+	const BoxRec *clip_start, *clip_end;
+};
+
+static void
+tor_blt_clipped(struct sna *sna,
+		struct sna_composite_spans_op *op,
+		pixman_region16_t *clip,
+		const BoxRec *box,
+		int coverage)
+{
+	struct clipped_span *cs = (struct clipped_span *)clip;
+	const BoxRec *c;
+
+	cs->clip_start =
+		find_clip_box_for_y(cs->clip_start, cs->clip_end, box->y1);
+
+	c = cs->clip_start;
+	while (c != cs->clip_end) {
+		BoxRec clipped;
+
+		if (box->y2 <= c->y1)
+			break;
+
+		clipped = *box;
+		if (!box_intersect(&clipped, c++))
+			continue;
+
+		cs->span(sna, op, NULL, &clipped, coverage);
+	}
+}
+
+inline static span_func_t
+clipped_span(struct clipped_span *cs,
+	     span_func_t span,
+	     const RegionRec *clip)
+{
+	if (clip->data) {
+		cs->span = span;
+		region_get_boxes(clip, &cs->clip_start, &cs->clip_end);
+		span = tor_blt_clipped;
+	}
+	return span;
+}
+
 static void
 tor_blt_src(struct sna *sna,
 	    struct sna_composite_spans_op *op,
@@ -2216,25 +2283,6 @@ tor_blt_src(struct sna *sna,
 	struct inplace *in = (struct inplace *)op;
 
 	_tor_blt_src(in, box, coverage_opacity(coverage, in->opacity));
-}
-
-static void
-tor_blt_src_clipped(struct sna *sna,
-		    struct sna_composite_spans_op *op,
-		    pixman_region16_t *clip,
-		    const BoxRec *box,
-		    int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		tor_blt_src(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
 }
 
 static void
@@ -2266,25 +2314,6 @@ tor_blt_in(struct sna *sna,
 			ptr[i] = mul_8_8(ptr[i], coverage);
 		ptr += in->stride;
 	} while (--h);
-}
-
-static void
-tor_blt_in_clipped(struct sna *sna,
-		   struct sna_composite_spans_op *op,
-		   pixman_region16_t *clip,
-		   const BoxRec *box,
-		   int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		tor_blt_in(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
 }
 
 static void
@@ -2326,25 +2355,6 @@ tor_blt_add(struct sna *sna,
 }
 
 static void
-tor_blt_add_clipped(struct sna *sna,
-		    struct sna_composite_spans_op *op,
-		    pixman_region16_t *clip,
-		    const BoxRec *box,
-		    int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		tor_blt_add(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
-}
-
-static void
 tor_blt_lerp32(struct sna *sna,
 	       struct sna_composite_spans_op *op,
 	       pixman_region16_t *clip,
@@ -2359,6 +2369,7 @@ tor_blt_lerp32(struct sna *sna,
 	if (coverage == 0)
 		return;
 
+	sigtrap_assert_active();
 	ptr += box->y1 * stride + box->x1;
 
 	h = box->y2 - box->y1;
@@ -2399,25 +2410,6 @@ tor_blt_lerp32(struct sna *sna,
 	}
 }
 
-static void
-tor_blt_lerp32_clipped(struct sna *sna,
-		       struct sna_composite_spans_op *op,
-		       pixman_region16_t *clip,
-		       const BoxRec *box,
-		       int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		tor_blt_lerp32(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
-}
-
 struct pixman_inplace {
 	pixman_image_t *image, *source, *mask;
 	uint32_t color;
@@ -2447,24 +2439,6 @@ pixmask_span_solid(struct sna *sna,
 			       pi->dx + box->x1, pi->dy + box->y1,
 			       box->x2 - box->x1, box->y2 - box->y1);
 }
-static void
-pixmask_span_solid__clipped(struct sna *sna,
-			    struct sna_composite_spans_op *op,
-			    pixman_region16_t *clip,
-			    const BoxRec *box,
-			    int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		pixmask_span_solid(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
-}
 
 static void
 pixmask_span(struct sna *sna,
@@ -2487,24 +2461,6 @@ pixmask_span(struct sna *sna,
 			       pi->dx + box->x1, pi->dy + box->y1,
 			       box->x2 - box->x1, box->y2 - box->y1);
 }
-static void
-pixmask_span__clipped(struct sna *sna,
-		      struct sna_composite_spans_op *op,
-		      pixman_region16_t *clip,
-		      const BoxRec *box,
-		      int coverage)
-{
-	pixman_region16_t region;
-	int n;
-
-	pixman_region_init_rects(&region, box, 1);
-	RegionIntersect(&region, &region, clip);
-	n = REGION_NUM_RECTS(&region);
-	box = REGION_RECTS(&region);
-	while (n--)
-		pixmask_span(sna, op, NULL, box++, coverage);
-	pixman_region_fini(&region);
-}
 
 struct inplace_x8r8g8b8_thread {
 	xTrapezoid *traps;
@@ -2523,6 +2479,7 @@ static void inplace_x8r8g8b8_thread(void *arg)
 	struct inplace_x8r8g8b8_thread *thread = arg;
 	struct tor tor;
 	span_func_t span;
+	struct clipped_span clipped;
 	RegionPtr clip;
 	int y1, y2, n;
 
@@ -2532,17 +2489,11 @@ static void inplace_x8r8g8b8_thread(void *arg)
 	y1 = thread->extents.y1 - thread->dst->pDrawable->y;
 	y2 = thread->extents.y2 - thread->dst->pDrawable->y;
 	for (n = 0; n < thread->ntrap; n++) {
-		xTrapezoid t;
-
 		if (pixman_fixed_to_int(thread->traps[n].top) >= y2 ||
 		    pixman_fixed_to_int(thread->traps[n].bottom) < y1)
 			continue;
 
-		if (!project_trapezoid_onto_grid(&thread->traps[n], thread->dx, thread->dy, &t))
-			continue;
-
-		tor_add_edge(&tor, &t, &t.left, 1);
-		tor_add_edge(&tor, &t, &t.right, -1);
+		tor_add_trapezoid(&tor, &thread->traps[n], thread->dx, thread->dy);
 	}
 
 	clip = thread->dst->pCompositeClip;
@@ -2559,12 +2510,11 @@ static void inplace_x8r8g8b8_thread(void *arg)
 		inplace.stride = pixmap->devKind;
 		inplace.color = thread->color;
 
-		if (clip->data)
-			span = tor_blt_lerp32_clipped;
-		else
-			span = tor_blt_lerp32;
+		span = clipped_span(&clipped, tor_blt_lerp32, clip);
 
-		tor_render(NULL, &tor, (void*)&inplace, clip, span, false);
+		tor_render(NULL, &tor,
+			   (void*)&inplace, (void*)&clipped,
+			   span, false);
 	} else if (thread->is_solid) {
 		struct pixman_inplace pi;
 
@@ -2577,12 +2527,11 @@ static void inplace_x8r8g8b8_thread(void *arg)
 						     1, 1, pi.bits, 0);
 		pixman_image_set_repeat(pi.source, PIXMAN_REPEAT_NORMAL);
 
-		if (clip->data)
-			span = pixmask_span_solid__clipped;
-		else
-			span = pixmask_span_solid;
+		span = clipped_span(&clipped, pixmask_span_solid, clip);
 
-		tor_render(NULL, &tor, (void*)&pi, clip, span, false);
+		tor_render(NULL, &tor,
+			   (void*)&pi, (void *)&clipped,
+			   span, false);
 
 		pixman_image_unref(pi.source);
 		pixman_image_unref(pi.image);
@@ -2601,12 +2550,11 @@ static void inplace_x8r8g8b8_thread(void *arg)
 		pi.bits = pixman_image_get_data(pi.mask);
 		pi.op = thread->op;
 
-		if (clip->data)
-			span = pixmask_span__clipped;
-		else
-			span = pixmask_span;
+		span = clipped_span(&clipped, pixmask_span, clip);
 
-		tor_render(NULL, &tor, (void*)&pi, clip, span, false);
+		tor_render(NULL, &tor,
+			   (void*)&pi, (void *)&clipped,
+			   span, false);
 
 		pixman_image_unref(pi.mask);
 		pixman_image_unref(pi.source);
@@ -2720,22 +2668,17 @@ trapezoid_span_inplace__x8r8g8b8(CARD8 op,
 	if (num_threads == 1) {
 		struct tor tor;
 		span_func_t span;
+		struct clipped_span clipped;
 
 		if (!tor_init(&tor, &region.extents, 2*ntrap))
 			return true;
 
 		for (n = 0; n < ntrap; n++) {
-			xTrapezoid t;
-
 			if (pixman_fixed_to_int(traps[n].top) >= region.extents.y2 - dst->pDrawable->y ||
 			    pixman_fixed_to_int(traps[n].bottom) < region.extents.y1 - dst->pDrawable->y)
 				continue;
 
-			if (!project_trapezoid_onto_grid(&traps[n], dx, dy, &t))
-				continue;
-
-			tor_add_edge(&tor, &t, &t.left, 1);
-			tor_add_edge(&tor, &t, &t.right, -1);
+			tor_add_trapezoid(&tor, &traps[n], dx, dy);
 		}
 
 		if (lerp) {
@@ -2751,17 +2694,15 @@ trapezoid_span_inplace__x8r8g8b8(CARD8 op,
 			inplace.stride = pixmap->devKind;
 			inplace.color = color;
 
-			if (dst->pCompositeClip->data)
-				span = tor_blt_lerp32_clipped;
-			else
-				span = tor_blt_lerp32;
+			span = clipped_span(&clipped, tor_blt_lerp32, dst->pCompositeClip);
 
 			DBG(("%s: render inplace op=%d, color=%08x\n",
 			     __FUNCTION__, op, color));
 
 			if (sigtrap_get() == 0) {
-				tor_render(NULL, &tor, (void*)&inplace,
-					   dst->pCompositeClip, span, false);
+				tor_render(NULL, &tor,
+					   (void*)&inplace, (void*)&clipped,
+					   span, false);
 				sigtrap_put();
 			}
 		} else if (is_solid) {
@@ -2776,15 +2717,12 @@ trapezoid_span_inplace__x8r8g8b8(CARD8 op,
 							     1, 1, pi.bits, 0);
 			pixman_image_set_repeat(pi.source, PIXMAN_REPEAT_NORMAL);
 
-			if (dst->pCompositeClip->data)
-				span = pixmask_span_solid__clipped;
-			else
-				span = pixmask_span_solid;
+			span = clipped_span(&clipped, pixmask_span_solid, dst->pCompositeClip);
 
 			if (sigtrap_get() == 0) {
-				tor_render(NULL, &tor, (void*)&pi,
-					   dst->pCompositeClip, span,
-					   false);
+				tor_render(NULL, &tor,
+					   (void*)&pi, (void*)&clipped,
+					   span, false);
 				sigtrap_put();
 			}
 
@@ -2805,15 +2743,12 @@ trapezoid_span_inplace__x8r8g8b8(CARD8 op,
 			pi.bits = pixman_image_get_data(pi.mask);
 			pi.op = op;
 
-			if (dst->pCompositeClip->data)
-				span = pixmask_span__clipped;
-			else
-				span = pixmask_span;
+			span = clipped_span(&clipped, pixmask_span, dst->pCompositeClip);
 
 			if (sigtrap_get() == 0) {
-				tor_render(NULL, &tor, (void*)&pi,
-					   dst->pCompositeClip, span,
-					   false);
+				tor_render(NULL, &tor,
+					   (void*)&pi, (void*)&clipped,
+					   span, false);
 				sigtrap_put();
 			}
 
@@ -2875,9 +2810,9 @@ trapezoid_span_inplace__x8r8g8b8(CARD8 op,
 
 struct inplace_thread {
 	xTrapezoid *traps;
-	RegionPtr clip;
 	span_func_t span;
 	struct inplace inplace;
+	struct clipped_span clipped;
 	BoxRec extents;
 	int dx, dy;
 	int draw_x, draw_y;
@@ -2895,21 +2830,16 @@ static void inplace_thread(void *arg)
 		return;
 
 	for (n = 0; n < thread->ntrap; n++) {
-		xTrapezoid t;
-
 		if (pixman_fixed_to_int(thread->traps[n].top) >= thread->extents.y2 - thread->draw_y ||
 		    pixman_fixed_to_int(thread->traps[n].bottom) < thread->extents.y1 - thread->draw_y)
 			continue;
 
-		if (!project_trapezoid_onto_grid(&thread->traps[n], thread->dx, thread->dy, &t))
-			continue;
-
-		tor_add_edge(&tor, &t, &t.left, 1);
-		tor_add_edge(&tor, &t, &t.right, -1);
+		tor_add_trapezoid(&tor, &thread->traps[n], thread->dx, thread->dy);
 	}
 
-	tor_render(NULL, &tor, (void*)&thread->inplace,
-		   thread->clip, thread->span, thread->unbounded);
+	tor_render(NULL, &tor,
+		   (void*)&thread->inplace, (void*)&thread->clipped,
+		   thread->span, thread->unbounded);
 
 	tor_fini(&tor);
 }
@@ -2923,6 +2853,7 @@ imprecise_trapezoid_span_inplace(struct sna *sna,
 				 bool fallback)
 {
 	struct inplace inplace;
+	struct clipped_span clipped;
 	span_func_t span;
 	PixmapPtr pixmap;
 	struct sna_pixmap *priv;
@@ -3039,21 +2970,12 @@ imprecise_trapezoid_span_inplace(struct sna *sna,
 	     region.extents.x2, region.extents.y2));
 
 	if (op == PictOpSrc) {
-		if (dst->pCompositeClip->data)
-			span = tor_blt_src_clipped;
-		else
-			span = tor_blt_src;
+		span = tor_blt_src;
 	} else if (op == PictOpIn) {
-		if (dst->pCompositeClip->data)
-			span = tor_blt_in_clipped;
-		else
-			span = tor_blt_in;
+		span = tor_blt_in;
 	} else {
 		assert(op == PictOpAdd);
-		if (dst->pCompositeClip->data)
-			span = tor_blt_add_clipped;
-		else
-			span = tor_blt_add;
+		span = tor_blt_add;
 	}
 
 	DBG(("%s: move-to-cpu\n", __FUNCTION__));
@@ -3071,6 +2993,8 @@ imprecise_trapezoid_span_inplace(struct sna *sna,
 	inplace.stride = pixmap->devKind;
 	inplace.opacity = color >> 24;
 
+	span = clipped_span(&clipped, span, dst->pCompositeClip);
+
 	num_threads = 1;
 	if ((flags & COMPOSITE_SPANS_RECTILINEAR) == 0)
 		num_threads = sna_use_threads(region.extents.x2 - region.extents.x1,
@@ -3083,22 +3007,17 @@ imprecise_trapezoid_span_inplace(struct sna *sna,
 			return true;
 
 		for (n = 0; n < ntrap; n++) {
-			xTrapezoid t;
-
 			if (pixman_fixed_to_int(traps[n].top) >= region.extents.y2 - dst->pDrawable->y ||
 			    pixman_fixed_to_int(traps[n].bottom) < region.extents.y1 - dst->pDrawable->y)
 				continue;
 
-			if (!project_trapezoid_onto_grid(&traps[n], dx, dy, &t))
-				continue;
-
-			tor_add_edge(&tor, &t, &t.left, 1);
-			tor_add_edge(&tor, &t, &t.right, -1);
+			tor_add_trapezoid(&tor, &traps[n], dx, dy);
 		}
 
 		if (sigtrap_get() == 0) {
-			tor_render(NULL, &tor, (void*)&inplace,
-				   dst->pCompositeClip, span, unbounded);
+			tor_render(NULL, &tor,
+				   (void*)&inplace, (void *)&clipped,
+				   span, unbounded);
 			sigtrap_put();
 		}
 
@@ -3115,8 +3034,8 @@ imprecise_trapezoid_span_inplace(struct sna *sna,
 		threads[0].traps = traps;
 		threads[0].ntrap = ntrap;
 		threads[0].inplace = inplace;
+		threads[0].clipped = clipped;
 		threads[0].extents = region.extents;
-		threads[0].clip = dst->pCompositeClip;
 		threads[0].span = span;
 		threads[0].unbounded = unbounded;
 		threads[0].dx = dx;
@@ -3225,17 +3144,11 @@ imprecise_trapezoid_span_fallback(CARD8 op, PicturePtr src, PicturePtr dst,
 	}
 
 	for (n = 0; n < ntrap; n++) {
-		xTrapezoid t;
-
 		if (pixman_fixed_to_int(traps[n].top) - dst_y >= extents.y2 ||
 		    pixman_fixed_to_int(traps[n].bottom) - dst_y < 0)
 			continue;
 
-		if (!project_trapezoid_onto_grid(&traps[n], dx, dy, &t))
-			continue;
-
-		tor_add_edge(&tor, &t, &t.left, 1);
-		tor_add_edge(&tor, &t, &t.right, -1);
+		tor_add_trapezoid(&tor, &traps[n], dx, dy);
 	}
 
 	if (extents.x2 <= TOR_INPLACE_SIZE) {
@@ -3278,27 +3191,11 @@ imprecise_trapezoid_span_fallback(CARD8 op, PicturePtr src, PicturePtr dst,
 	return true;
 }
 
-static inline bool
-project_trap_onto_grid(const xTrap *in,
-		       int dx, int dy,
-		       xTrap *out)
-{
-	out->top.l = dx + pixman_fixed_to_fast(in->top.l);
-	out->top.r = dx + pixman_fixed_to_fast(in->top.r);
-	out->top.y = dy + pixman_fixed_to_fast(in->top.y);
-
-	out->bot.l = dx + pixman_fixed_to_fast(in->bot.l);
-	out->bot.r = dx + pixman_fixed_to_fast(in->bot.r);
-	out->bot.y = dy + pixman_fixed_to_fast(in->bot.y);
-
-	return out->bot.y > out->top.y;
-}
-
 bool
-trap_span_converter(struct sna *sna,
-		    PicturePtr dst,
-		    INT16 src_x, INT16 src_y,
-		    int ntrap, xTrap *trap)
+imprecise_trap_span_converter(struct sna *sna,
+			      PicturePtr dst,
+			      INT16 src_x, INT16 src_y,
+			      int ntrap, xTrap *trap)
 {
 	struct sna_composite_spans_op tmp;
 	struct tor tor;
@@ -3306,14 +3203,8 @@ trap_span_converter(struct sna *sna,
 	pixman_region16_t *clip;
 	int dx, dy, n;
 
-	if (NO_SCAN_CONVERTER)
-		return false;
-
 	if (dst->pDrawable->depth < 8)
 		return false;
-
-	if (dst->polyEdge == PolyEdgeSharp)
-		return mono_trap_span_converter(sna, dst, src_x, src_y, ntrap, trap);
 
 	if (!sna->render.check_composite_spans(sna, PictOpAdd, sna->render.white_picture, dst,
 					       dst->pCompositeClip->extents.x2 - dst->pCompositeClip->extents.x1,
@@ -3354,27 +3245,23 @@ trap_span_converter(struct sna *sna,
 		goto skip;
 
 	for (n = 0; n < ntrap; n++) {
-		xTrap t;
 		xPointFixed p1, p2;
 
 		if (pixman_fixed_to_int(trap[n].top.y) + dst->pDrawable->y >= extents.y2 ||
 		    pixman_fixed_to_int(trap[n].bot.y) + dst->pDrawable->y < extents.y1)
 			continue;
 
-		if (!project_trap_onto_grid(&trap[n], dx, dy, &t))
-			continue;
+		p1.y = trap[n].top.y;
+		p2.y = trap[n].bot.y;
+		p1.x = trap[n].top.l;
+		p2.x = trap[n].bot.l;
+		polygon_add_line(tor.polygon, &p1, &p2, dx, dy);
 
-		p1.y = t.top.y;
-		p2.y = t.bot.y;
-		p1.x = t.top.l;
-		p2.x = t.bot.l;
-		polygon_add_line(tor.polygon, &p1, &p2);
-
-		p1.y = t.bot.y;
-		p2.y = t.top.y;
-		p1.x = t.top.r;
-		p2.x = t.bot.r;
-		polygon_add_line(tor.polygon, &p1, &p2);
+		p1.y = trap[n].bot.y;
+		p2.y = trap[n].top.y;
+		p1.x = trap[n].top.r;
+		p2.x = trap[n].bot.r;
+		polygon_add_line(tor.polygon, &p1, &p2, dx, dy);
 	}
 
 	tor_render(sna, &tor, &tmp, clip,
@@ -3395,9 +3282,7 @@ static void mark_damaged(PixmapPtr pixmap, struct sna_pixmap *priv,
 	    box->x2 >= pixmap->drawable.width &&
 	    box->y2 >= pixmap->drawable.height) {
 		sna_damage_destroy(&priv->cpu_damage);
-		sna_damage_all(&priv->gpu_damage,
-			       pixmap->drawable.width,
-			       pixmap->drawable.height);
+		sna_damage_all(&priv->gpu_damage, pixmap);
 		list_del(&priv->flush_list);
 	} else {
 		sna_damage_add_box(&priv->gpu_damage, box);
@@ -3476,27 +3361,23 @@ trap_mask_converter(struct sna *sna,
 	}
 
 	for (n = 0; n < ntrap; n++) {
-		xTrap t;
 		xPointFixed p1, p2;
 
 		if (pixman_fixed_to_int(trap[n].top.y) + picture->pDrawable->y >= extents.y2 ||
 		    pixman_fixed_to_int(trap[n].bot.y) + picture->pDrawable->y < extents.y1)
 			continue;
 
-		if (!project_trap_onto_grid(&trap[n], dx, dy, &t))
-			continue;
+		p1.y = trap[n].top.y;
+		p2.y = trap[n].bot.y;
+		p1.x = trap[n].top.l;
+		p2.x = trap[n].bot.l;
+		polygon_add_line(tor.polygon, &p1, &p2, dx, dy);
 
-		p1.y = t.top.y;
-		p2.y = t.bot.y;
-		p1.x = t.top.l;
-		p2.x = t.bot.l;
-		polygon_add_line(tor.polygon, &p1, &p2);
-
-		p1.y = t.bot.y;
-		p2.y = t.top.y;
-		p1.x = t.top.r;
-		p2.x = t.bot.r;
-		polygon_add_line(tor.polygon, &p1, &p2);
+		p1.y = trap[n].bot.y;
+		p2.y = trap[n].top.y;
+		p1.x = trap[n].top.r;
+		p2.x = trap[n].bot.r;
+		polygon_add_line(tor.polygon, &p1, &p2, dx, dy);
 	}
 
 	if (picture->polyEdge == PolyEdgeSharp)
@@ -3515,34 +3396,12 @@ trap_mask_converter(struct sna *sna,
 	get_drawable_deltas(picture->pDrawable, pixmap, &x, &y);
 	sna = to_sna_from_screen(screen);
 	sna->render.copy_boxes(sna, GXcopy,
-			       scratch, __sna_pixmap_get_bo(scratch), -extents.x1, -extents.x1,
-			       pixmap, priv->gpu_bo, x, y,
+			       &scratch->drawable, __sna_pixmap_get_bo(scratch), -extents.x1, -extents.x1,
+			       &pixmap->drawable, priv->gpu_bo, x, y,
 			       &extents, 1, 0);
 	mark_damaged(pixmap, priv, &extents ,x, y);
 	sna_pixmap_destroy(scratch);
 	return true;
-}
-
-static inline void
-project_point_onto_grid(const xPointFixed *in,
-			int dx, int dy,
-			xPointFixed *out)
-{
-	out->x = dx + pixman_fixed_to_fast(in->x);
-	out->y = dy + pixman_fixed_to_fast(in->y);
-}
-
-#if HAS_PIXMAN_TRIANGLES
-static inline bool
-project_triangle_onto_grid(const xTriangle *in,
-			   int dx, int dy,
-			   xTriangle *out)
-{
-	project_point_onto_grid(&in->p1, dx, dy, &out->p1);
-	project_point_onto_grid(&in->p2, dx, dy, &out->p2);
-	project_point_onto_grid(&in->p3, dx, dy, &out->p3);
-
-	return xTriangleValid(out);
 }
 
 bool
@@ -3654,14 +3513,9 @@ triangles_span_converter(struct sna *sna,
 		goto skip;
 
 	for (n = 0; n < count; n++) {
-		xTriangle t;
-
-		if (!project_triangle_onto_grid(&tri[n], dx, dy, &t))
-			continue;
-
-		polygon_add_line(tor.polygon, &t.p1, &t.p2);
-		polygon_add_line(tor.polygon, &t.p2, &t.p3);
-		polygon_add_line(tor.polygon, &t.p3, &t.p1);
+		polygon_add_line(tor.polygon, &tri[n].p1, &tri[n].p2, dx, dy);
+		polygon_add_line(tor.polygon, &tri[n].p2, &tri[n].p3, dx, dy);
+		polygon_add_line(tor.polygon, &tri[n].p3, &tri[n].p1, dx, dy);
 	}
 
 	tor_render(sna, &tor, &tmp, &clip,
@@ -3756,14 +3610,9 @@ triangles_mask_converter(CARD8 op, PicturePtr src, PicturePtr dst,
 	}
 
 	for (n = 0; n < count; n++) {
-		xTriangle t;
-
-		if (!project_triangle_onto_grid(&tri[n], dx, dy, &t))
-			continue;
-
-		polygon_add_line(tor.polygon, &t.p1, &t.p2);
-		polygon_add_line(tor.polygon, &t.p2, &t.p3);
-		polygon_add_line(tor.polygon, &t.p3, &t.p1);
+		polygon_add_line(tor.polygon, &tri[n].p1, &tri[n].p2, dx, dy);
+		polygon_add_line(tor.polygon, &tri[n].p2, &tri[n].p3, dx, dy);
+		polygon_add_line(tor.polygon, &tri[n].p3, &tri[n].p1, dx, dy);
 	}
 
 	if (maskFormat ? maskFormat->depth < 8 : dst->polyEdge == PolyEdgeSharp)
@@ -3794,31 +3643,82 @@ triangles_mask_converter(CARD8 op, PicturePtr src, PicturePtr dst,
 	return true;
 }
 
+struct tristrip_thread {
+	struct sna *sna;
+	const struct sna_composite_spans_op *op;
+	const xPointFixed *points;
+	RegionPtr clip;
+	span_func_t span;
+	BoxRec extents;
+	int dx, dy, draw_y;
+	int count;
+	bool unbounded;
+};
+
+static void
+tristrip_thread(void *arg)
+{
+	struct tristrip_thread *thread = arg;
+	struct span_thread_boxes boxes;
+	struct tor tor;
+	int n, cw, ccw;
+
+	if (!tor_init(&tor, &thread->extents, 2*thread->count))
+		return;
+
+	span_thread_boxes_init(&boxes, thread->op, thread->clip);
+
+	cw = 0; ccw = 1;
+	polygon_add_line(tor.polygon,
+			 &thread->points[ccw], &thread->points[cw],
+			 thread->dx, thread->dy);
+	n = 2;
+	do {
+		polygon_add_line(tor.polygon,
+				 &thread->points[cw], &thread->points[n],
+				 thread->dx, thread->dy);
+		cw = n;
+		if (++n == thread->count)
+			break;
+
+		polygon_add_line(tor.polygon,
+				 &thread->points[n], &thread->points[ccw],
+				 thread->dx, thread->dy);
+		ccw = n;
+		if (++n == thread->count)
+			break;
+	} while (1);
+	polygon_add_line(tor.polygon,
+			 &thread->points[cw], &thread->points[ccw],
+			 thread->dx, thread->dy);
+	assert(tor.polygon->num_edges <= 2*thread->count);
+
+	tor_render(thread->sna, &tor,
+		   (struct sna_composite_spans_op *)&boxes, thread->clip,
+		   thread->span, thread->unbounded);
+
+	tor_fini(&tor);
+
+	if (boxes.num_boxes) {
+		DBG(("%s: flushing %d boxes\n", __FUNCTION__, boxes.num_boxes));
+		assert(boxes.num_boxes <= SPAN_THREAD_MAX_BOXES);
+		thread->op->thread_boxes(thread->sna, thread->op,
+					 boxes.boxes, boxes.num_boxes);
+	}
+}
+
 bool
-tristrip_span_converter(struct sna *sna,
-			CARD8 op, PicturePtr src, PicturePtr dst,
-			PictFormatPtr maskFormat, INT16 src_x, INT16 src_y,
-			int count, xPointFixed *points)
+imprecise_tristrip_span_converter(struct sna *sna,
+				  CARD8 op, PicturePtr src, PicturePtr dst,
+				  PictFormatPtr maskFormat, INT16 src_x, INT16 src_y,
+				  int count, xPointFixed *points)
 {
 	struct sna_composite_spans_op tmp;
-	struct tor tor;
 	BoxRec extents;
 	pixman_region16_t clip;
-	xPointFixed p[4];
 	int16_t dst_x, dst_y;
-	int dx, dy;
-	int cw, ccw, n;
+	int dx, dy, num_threads;
 	bool was_clear;
-
-	if (NO_SCAN_CONVERTER)
-		return false;
-
-	/* XXX strict adherence to the Render specification */
-	if (is_precise(dst, maskFormat)) {
-		DBG(("%s: fallback -- precise rasterisation requested\n",
-		     __FUNCTION__));
-		return false;
-	}
 
 	if (!sna->render.check_composite_spans(sna, op, src, dst, 0, 0, 0)) {
 		DBG(("%s: fallback -- composite spans not supported\n",
@@ -3896,40 +3796,94 @@ tristrip_span_converter(struct sna *sna,
 
 	dx *= FAST_SAMPLES_X;
 	dy *= FAST_SAMPLES_Y;
-	if (!tor_init(&tor, &extents, 2*count))
-		goto skip;
 
-	cw = ccw = 0;
-	project_point_onto_grid(&points[0], dx, dy, &p[cw]);
-	project_point_onto_grid(&points[1], dx, dy, &p[2+ccw]);
-	polygon_add_line(tor.polygon, &p[cw], &p[2+ccw]);
-	n = 2;
-	do {
-		cw = !cw;
-		project_point_onto_grid(&points[n], dx, dy, &p[cw]);
-		polygon_add_line(tor.polygon, &p[!cw], &p[cw]);
-		if (++n == count)
-			break;
+	num_threads = 1;
+	if (!NO_GPU_THREADS &&
+	    tmp.thread_boxes &&
+	    thread_choose_span(&tmp, dst, maskFormat, &clip))
+		num_threads = sna_use_threads(extents.x2 - extents.x1,
+					      extents.y2 - extents.y1,
+					      16);
+	if (num_threads == 1) {
+		struct tor tor;
+		int cw, ccw, n;
 
-		ccw = !ccw;
-		project_point_onto_grid(&points[n], dx, dy, &p[2+ccw]);
-		polygon_add_line(tor.polygon, &p[2+ccw], &p[2+!ccw]);
-		if (++n == count)
-			break;
-	} while (1);
-	polygon_add_line(tor.polygon, &p[2+ccw], &p[cw]);
-	assert(tor.polygon->num_edges <= 2*count);
+		if (!tor_init(&tor, &extents, 2*count))
+			goto skip;
 
-	tor_render(sna, &tor, &tmp, &clip,
-		   choose_span(&tmp, dst, maskFormat, &clip),
-		   !was_clear && maskFormat && !operator_is_bounded(op));
+		cw = 0; ccw = 1;
+		polygon_add_line(tor.polygon,
+				 &points[ccw], &points[cw],
+				 dx, dy);
+		n = 2;
+		do {
+			polygon_add_line(tor.polygon,
+					 &points[cw], &points[n],
+					 dx, dy);
+			cw = n;
+			if (++n == count)
+				break;
 
-	tor_fini(&tor);
+			polygon_add_line(tor.polygon,
+					 &points[n], &points[ccw],
+					 dx, dy);
+			ccw = n;
+			if (++n == count)
+				break;
+		} while (1);
+		polygon_add_line(tor.polygon,
+				 &points[cw], &points[ccw],
+				 dx, dy);
+		assert(tor.polygon->num_edges <= 2*count);
+
+		tor_render(sna, &tor, &tmp, &clip,
+			   choose_span(&tmp, dst, maskFormat, &clip),
+			   !was_clear && maskFormat && !operator_is_bounded(op));
+
+		tor_fini(&tor);
+	} else {
+		struct tristrip_thread threads[num_threads];
+		int y, h, n;
+
+		DBG(("%s: using %d threads for tristrip compositing %dx%d\n",
+		     __FUNCTION__, num_threads,
+		     clip.extents.x2 - clip.extents.x1,
+		     clip.extents.y2 - clip.extents.y1));
+
+		threads[0].sna = sna;
+		threads[0].op = &tmp;
+		threads[0].points = points;
+		threads[0].count = count;
+		threads[0].extents = clip.extents;
+		threads[0].clip = &clip;
+		threads[0].dx = dx;
+		threads[0].dy = dy;
+		threads[0].draw_y = dst->pDrawable->y;
+		threads[0].unbounded = !was_clear && maskFormat && !operator_is_bounded(op);
+		threads[0].span = thread_choose_span(&tmp, dst, maskFormat, &clip);
+
+		y = clip.extents.y1;
+		h = clip.extents.y2 - clip.extents.y1;
+		h = (h + num_threads - 1) / num_threads;
+		num_threads -= (num_threads-1) * h >= clip.extents.y2 - clip.extents.y1;
+
+		for (n = 1; n < num_threads; n++) {
+			threads[n] = threads[0];
+			threads[n].extents.y1 = y;
+			threads[n].extents.y2 = y += h;
+
+			sna_threads_run(n, tristrip_thread, &threads[n]);
+		}
+
+		assert(y < threads[0].extents.y2);
+		threads[0].extents.y1 = y;
+		tristrip_thread(&threads[0]);
+
+		sna_threads_wait();
+	}
 skip:
 	tmp.done(sna, &tmp);
 
 	REGION_UNINIT(NULL, &clip);
 	return true;
 }
-
-#endif

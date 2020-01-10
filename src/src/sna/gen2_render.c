@@ -350,28 +350,39 @@ gen2_get_blend_factors(const struct sna_composite_op *op,
 	cblend = TB0C_LAST_STAGE | TB0C_RESULT_SCALE_1X | TB0C_OUTPUT_WRITE_CURRENT;
 	ablend = TB0A_RESULT_SCALE_1X | TB0A_OUTPUT_WRITE_CURRENT;
 
-
 	/* Get the source picture's channels into TBx_ARG1 */
-	if (op->src.is_solid)
-		cblend |= TB0C_ARG1_SEL_DIFFUSE;
-	else if (PICT_FORMAT_RGB(op->src.pict_format) != 0)
-		cblend |= TB0C_ARG1_SEL_TEXEL0;
-	else
-		cblend |= TB0C_ARG1_SEL_ONE | TB0C_ARG1_INVERT;	/* 0.0 */
-	if (op->src.is_solid)
-		ablend |= TB0A_ARG1_SEL_DIFFUSE;
-	else if (op->src.is_opaque)
-		ablend |= TB0A_ARG1_SEL_ONE;
-	else
-		ablend |= TB0A_ARG1_SEL_TEXEL0;
 	if ((op->has_component_alpha && gen2_blend_op[blend].src_alpha) ||
-	    op->dst.format == PICT_a8)
+	    op->dst.format == PICT_a8) {
 		/* Producing source alpha value, so the first set of channels
 		 * is src.A instead of src.X.  We also do this if the destination
 		 * is a8, in which case src.G is what's written, and the other
 		 * channels are ignored.
 		 */
-		cblend |= TB0C_ARG1_REPLICATE_ALPHA;
+		if (op->src.is_opaque) {
+			ablend |= TB0C_ARG1_SEL_ONE;
+			cblend |= TB0C_ARG1_SEL_ONE;
+		} else if (op->src.is_solid) {
+			ablend |= TB0C_ARG1_SEL_DIFFUSE;
+			cblend |= TB0C_ARG1_SEL_DIFFUSE | TB0C_ARG1_REPLICATE_ALPHA;
+		} else {
+			ablend |= TB0C_ARG1_SEL_TEXEL0;
+			cblend |= TB0C_ARG1_SEL_TEXEL0 | TB0C_ARG1_REPLICATE_ALPHA;
+		}
+	} else {
+		if (op->src.is_solid)
+			cblend |= TB0C_ARG1_SEL_DIFFUSE;
+		else if (PICT_FORMAT_RGB(op->src.pict_format) != 0)
+			cblend |= TB0C_ARG1_SEL_TEXEL0;
+		else
+			cblend |= TB0C_ARG1_SEL_ONE | TB0C_ARG1_INVERT;	/* 0.0 */
+
+		if (op->src.is_opaque)
+			ablend |= TB0A_ARG1_SEL_ONE;
+		else if (op->src.is_solid)
+			ablend |= TB0A_ARG1_SEL_DIFFUSE;
+		else
+			ablend |= TB0A_ARG1_SEL_TEXEL0;
+	}
 
 	if (op->mask.bo) {
 		if (op->src.is_solid) {
@@ -1557,6 +1568,18 @@ gen2_composite_picture(struct sna *sna,
 		y += dy;
 		channel->transform = NULL;
 		channel->filter = PictFilterNearest;
+
+		if (channel->repeat &&
+		    (x >= 0 &&
+		     y >= 0 &&
+		     x + w <= pixmap->drawable.width &&
+		     y + h <= pixmap->drawable.height)) {
+			struct sna_pixmap *priv = sna_pixmap(pixmap);
+			if (priv && priv->clear) {
+				DBG(("%s: converting large pixmap source into solid [%08x]\n", __FUNCTION__, priv->clear_color));
+				return gen2_composite_solid_init(sna, channel, solid_color(picture->format, priv->clear_color));
+			}
+		}
 	} else
 		channel->transform = picture->transform;
 
@@ -1598,7 +1621,7 @@ gen2_composite_set_target(struct sna *sna,
 
 	hint = PREFER_GPU | FORCE_GPU | RENDER_GPU;
 	if (!partial) {
-		hint |= IGNORE_CPU;
+		hint |= IGNORE_DAMAGE;
 		if (w == op->dst.width && h == op->dst.height)
 			hint |= REPLACES;
 	}
@@ -1607,14 +1630,19 @@ gen2_composite_set_target(struct sna *sna,
 	if (op->dst.bo == NULL)
 		return false;
 
+	if (hint & REPLACES) {
+		struct sna_pixmap *priv = sna_pixmap(op->dst.pixmap);
+		kgem_bo_pair_undo(&sna->kgem, priv->gpu_bo, priv->cpu_bo);
+	}
+
 	assert((op->dst.bo->pitch & 7) == 0);
 
 	get_drawable_deltas(dst->pDrawable, op->dst.pixmap,
 			    &op->dst.x, &op->dst.y);
 
-	DBG(("%s: pixmap=%p, format=%08x, size=%dx%d, pitch=%d, delta=(%d,%d),damage=%p\n",
+	DBG(("%s: pixmap=%ld, format=%08x, size=%dx%d, pitch=%d, delta=(%d,%d),damage=%p\n",
 	     __FUNCTION__,
-	     op->dst.pixmap, (int)op->dst.format,
+	     op->dst.pixmap->drawable.serialNumber, (int)op->dst.format,
 	     op->dst.width, op->dst.height,
 	     op->dst.bo->pitch,
 	     op->dst.x, op->dst.y,
@@ -1881,7 +1909,7 @@ gen2_render_composite(struct sna *sna,
 
 	if (!gen2_composite_set_target(sna, tmp, dst,
 				       dst_x, dst_y, width, height,
-				       flags & COMPOSITE_PARTIAL || op > PictOpSrc || dst->pCompositeClip->data != NULL)) {
+				       flags & COMPOSITE_PARTIAL || op > PictOpSrc)) {
 		DBG(("%s: unable to set render target\n",
 		     __FUNCTION__));
 		goto fallback;
@@ -2706,7 +2734,7 @@ static bool
 gen2_render_fill_boxes_try_blt(struct sna *sna,
 			       CARD8 op, PictFormat format,
 			       const xRenderColor *color,
-			       PixmapPtr dst, struct kgem_bo *dst_bo,
+			       const DrawableRec *dst, struct kgem_bo *dst_bo,
 			       const BoxRec *box, int n)
 {
 	uint8_t alu;
@@ -2729,7 +2757,7 @@ gen2_render_fill_boxes_try_blt(struct sna *sna,
 		alu = GXcopy;
 
 	return sna_blt_fill_boxes(sna, alu,
-				  dst_bo, dst->drawable.bitsPerPixel,
+				  dst_bo, dst->bitsPerPixel,
 				  pixel, box, n);
 }
 
@@ -2738,7 +2766,7 @@ gen2_render_fill_boxes(struct sna *sna,
 		       CARD8 op,
 		       PictFormat format,
 		       const xRenderColor *color,
-		       PixmapPtr dst, struct kgem_bo *dst_bo,
+		       const DrawableRec *dst, struct kgem_bo *dst_bo,
 		       const BoxRec *box, int n)
 {
 	struct sna_composite_op tmp;
@@ -2765,7 +2793,7 @@ gen2_render_fill_boxes(struct sna *sna,
 	     __FUNCTION__, op, (int)format,
 	     color->red, color->green, color->blue, color->alpha));
 
-	if (too_large(dst->drawable.width, dst->drawable.height) ||
+	if (too_large(dst->width, dst->height) ||
 	    dst_bo->pitch < 8 || dst_bo->pitch > MAX_3D_PITCH ||
 	    !gen2_check_dst_format(format)) {
 		DBG(("%s: try blt, too large or incompatible destination\n",
@@ -2793,9 +2821,9 @@ gen2_render_fill_boxes(struct sna *sna,
 
 	memset(&tmp, 0, sizeof(tmp));
 	tmp.op = op;
-	tmp.dst.pixmap = dst;
-	tmp.dst.width = dst->drawable.width;
-	tmp.dst.height = dst->drawable.height;
+	tmp.dst.pixmap = (PixmapPtr)dst;
+	tmp.dst.width = dst->width;
+	tmp.dst.height = dst->height;
 	tmp.dst.format = format;
 	tmp.dst.bo = dst_bo;
 	tmp.floats_per_vertex = 2;
@@ -3075,20 +3103,20 @@ gen2_render_fill_one(struct sna *sna, PixmapPtr dst, struct kgem_bo *bo,
 
 static void
 gen2_render_copy_setup_source(struct sna_composite_channel *channel,
-			      PixmapPtr pixmap,
+			      const DrawableRec *draw,
 			      struct kgem_bo *bo)
 {
-	assert(pixmap->drawable.width && pixmap->drawable.height);
+	assert(draw->width && draw->height);
 
 	channel->filter = PictFilterNearest;
 	channel->repeat = RepeatNone;
-	channel->width  = pixmap->drawable.width;
-	channel->height = pixmap->drawable.height;
-	channel->scale[0] = 1.f/pixmap->drawable.width;
-	channel->scale[1] = 1.f/pixmap->drawable.height;
+	channel->width  = draw->width;
+	channel->height = draw->height;
+	channel->scale[0] = 1.f/draw->width;
+	channel->scale[1] = 1.f/draw->height;
 	channel->offset[0] = 0;
 	channel->offset[1] = 0;
-	channel->pict_format = sna_format_for_depth(pixmap->drawable.depth);
+	channel->pict_format = sna_format_for_depth(draw->depth);
 	channel->bo = bo;
 	channel->is_affine = 1;
 
@@ -3177,8 +3205,8 @@ static void gen2_emit_copy_state(struct sna *sna, const struct sna_composite_op 
 
 static bool
 gen2_render_copy_boxes(struct sna *sna, uint8_t alu,
-		       PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
-		       PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+		       const DrawableRec *src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+		       const DrawableRec *dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 		       const BoxRec *box, int n, unsigned flags)
 {
 	struct sna_composite_op tmp;
@@ -3197,16 +3225,16 @@ gen2_render_copy_boxes(struct sna *sna, uint8_t alu,
 	DBG(("%s (%d, %d)->(%d, %d) x %d\n",
 	     __FUNCTION__, src_dx, src_dy, dst_dx, dst_dy, n));
 
-	if (sna_blt_compare_depth(&src->drawable, &dst->drawable) &&
+	if (sna_blt_compare_depth(src, dst) &&
 	    sna_blt_copy_boxes(sna, alu,
 			       src_bo, src_dx, src_dy,
 			       dst_bo, dst_dx, dst_dy,
-			       dst->drawable.bitsPerPixel,
+			       dst->bitsPerPixel,
 			       box, n))
 		return true;
 
 	if (src_bo == dst_bo || /* XXX handle overlap using 3D ? */
-	    too_large(src->drawable.width, src->drawable.height) ||
+	    too_large(src->width, src->height) ||
 	    src_bo->pitch > MAX_3D_PITCH || dst_bo->pitch < 8) {
 fallback:
 		return sna_blt_copy_boxes_fallback(sna, alu,
@@ -3226,10 +3254,10 @@ fallback:
 	memset(&tmp, 0, sizeof(tmp));
 	tmp.op = alu;
 
-	tmp.dst.pixmap = dst;
-	tmp.dst.width = dst->drawable.width;
-	tmp.dst.height = dst->drawable.height;
-	tmp.dst.format = sna_format_for_depth(dst->drawable.depth);
+	tmp.dst.pixmap = (PixmapPtr)dst;
+	tmp.dst.width = dst->width;
+	tmp.dst.height = dst->height;
+	tmp.dst.format = sna_format_for_depth(dst->depth);
 	tmp.dst.bo = dst_bo;
 	tmp.dst.x = tmp.dst.y = 0;
 	tmp.damage = NULL;
@@ -3400,7 +3428,7 @@ fallback:
 	tmp->base.dst.format = sna_format_for_depth(dst->drawable.depth);
 	tmp->base.dst.bo = dst_bo;
 
-	gen2_render_copy_setup_source(&tmp->base.src, src, src_bo);
+	gen2_render_copy_setup_source(&tmp->base.src, &src->drawable, src_bo);
 	tmp->base.mask.bo = NULL;
 
 	tmp->base.floats_per_vertex = 4;

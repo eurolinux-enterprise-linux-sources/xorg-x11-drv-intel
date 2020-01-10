@@ -1,0 +1,37 @@
+From b75dc257a9643c8b50631a171394d931e2c4d202 Mon Sep 17 00:00:00 2001
+From: Olivier Fourdan <ofourdan@redhat.com>
+Date: Thu, 26 Mar 2015 11:20:08 +0100
+Subject: [PATCH] uxa: Do not use RandR if not available
+
+When using Xinerama, RandR is automatically disabled, and calling RR
+routines will trigger an assert() leading to an Xserver abort.
+
+Hotplug makes no sense without RandR, so it safe to just return if RandR
+is not available.
+
+Signed-off-by: Olivier Fourdan <ofourdan@redhat.com>
+---
+ src/uxa/intel_display.c | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/src/uxa/intel_display.c b/src/uxa/intel_display.c
+index 544382a..171f24c 100644
+--- a/src/uxa/intel_display.c
++++ b/src/uxa/intel_display.c
+@@ -2510,6 +2510,13 @@ intel_mode_hotplug(struct intel_screen_p
+ 	Bool found;
+ 	Bool changed = FALSE;
+ 
++#ifdef HAS_DIXREGISTERPRIVATEKEY
++	/* Without RR, nothing we can do here */
++	if (!dixPrivateKeyRegistered(rrPrivKey))
++		return;
++#endif
++
++ 	mode_res = drmModeGetResources(intel->drmSubFD);
+ 	mode_res = drmModeGetResources(intel->drmSubFD);
+ 	if (!mode_res)
+ 		goto out;
+-- 
+2.1.0
+

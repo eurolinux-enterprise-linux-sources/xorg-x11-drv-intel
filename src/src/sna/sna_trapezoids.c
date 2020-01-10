@@ -75,8 +75,16 @@ bool trapezoids_bounds(int n, const xTrapezoid *t, BoxPtr box)
 	do {
 		xFixed fx1, fx2, v;
 
-		if (!xTrapezoidValid(t))
+		if (!xTrapezoidValid(t)) {
+			__DBG(("%s: skipping invalid trapezoid: top=%d, bottom=%d, left=(%d, %d), (%d, %d), right=(%d, %d), (%d, %d)\n",
+			       __FUNCTION__,
+			       t->top, t->bottom,
+			       t->left.p1.x, t->left.p1.y,
+			       t->left.p2.x, t->left.p2.y,
+			       t->right.p1.x, t->right.p1.y,
+			       t->right.p2.x, t->right.p2.y));
 			continue;
+		}
 
 		if (t->top < y1)
 			y1 = t->top;
@@ -104,7 +112,7 @@ bool trapezoids_bounds(int n, const xTrapezoid *t, BoxPtr box)
 		}
 
 		if (((x2 - t->right.p1.x) | (x2 - t->right.p2.x)) < 0) {
-			if (pixman_fixed_floor(t->right.p1.x) == pixman_fixed_floor(t->right.p2.x)) {
+			if (pixman_fixed_ceil(t->right.p1.x) == pixman_fixed_ceil(t->right.p2.x)) {
 				x2 = pixman_fixed_ceil(t->right.p1.x);
 			} else {
 				if (t->right.p1.y == t->top)
@@ -595,12 +603,10 @@ sna_composite_trapezoids(CARD8 op,
 	}
 
 	if (FORCE_FALLBACK == 0 &&
-	    (too_small(priv) || DAMAGE_IS_ALL(priv->cpu_damage)) &&
-	    !picture_is_gpu(sna, src, 0) && untransformed(src)) {
-		DBG(("%s: force fallbacks -- (too small, %dx%d? %d || all-cpu? %d) && (src-is-cpu? %d && untransformed? %d)\n",
+	    !is_gpu_dst(priv) && !picture_is_gpu(sna, src, 0) && untransformed(src)) {
+		DBG(("%s: force fallbacks -- (!gpu dst, %dx%d? %d) && (src-is-cpu? %d && untransformed? %d)\n",
 		     __FUNCTION__, dst->pDrawable->width, dst->pDrawable->height,
-		     too_small(priv), (int)DAMAGE_IS_ALL(priv->cpu_damage),
-		     !picture_is_gpu(sna, src, 0), untransformed(src)));
+		     !is_gpu_dst(priv), !picture_is_gpu(sna, src, 0), untransformed(src)));
 
 force_fallback:
 		force_fallback = true;
@@ -725,9 +731,7 @@ static void mark_damaged(PixmapPtr pixmap, struct sna_pixmap *priv,
 	    box->x2 >= pixmap->drawable.width &&
 	    box->y2 >= pixmap->drawable.height) {
 		sna_damage_destroy(&priv->cpu_damage);
-		sna_damage_all(&priv->gpu_damage,
-			       pixmap->drawable.width,
-			       pixmap->drawable.height);
+		sna_damage_all(&priv->gpu_damage, pixmap);
 		list_del(&priv->flush_list);
 	} else {
 		sna_damage_add_box(&priv->gpu_damage, box);
@@ -791,7 +795,8 @@ trap_upload(PicturePtr picture,
 		return true;
 
 	memset(scratch->devPrivate.ptr, 0, scratch->devKind*height);
-	image = pixman_image_create_bits(picture->format, width, height,
+	image = pixman_image_create_bits((pixman_format_code_t)picture->format,
+					 width, height,
 					 scratch->devPrivate.ptr,
 					 scratch->devKind);
 	if (image) {
@@ -804,8 +809,8 @@ trap_upload(PicturePtr picture,
 	/* XXX clip boxes */
 	get_drawable_deltas(picture->pDrawable, pixmap, &x, &y);
 	sna->render.copy_boxes(sna, GXcopy,
-			       scratch, __sna_pixmap_get_bo(scratch), -extents.x1, -extents.x1,
-			       pixmap, priv->gpu_bo, x, y,
+			       &scratch->drawable, __sna_pixmap_get_bo(scratch), -extents.x1, -extents.x1,
+			       &pixmap->drawable, priv->gpu_bo, x, y,
 			       &extents, 1, 0);
 	mark_damaged(pixmap, priv, &extents, x, y);
 
@@ -816,12 +821,13 @@ trap_upload(PicturePtr picture,
 void
 sna_add_traps(PicturePtr picture, INT16 x, INT16 y, int n, xTrap *t)
 {
-	struct sna *sna;
+	PixmapPtr pixmap = get_drawable_pixmap(picture->pDrawable);
+	struct sna *sna = to_sna_from_pixmap(pixmap);
+	struct sna_pixmap *priv = sna_pixmap(pixmap);
 
 	DBG(("%s (%d, %d) x %d\n", __FUNCTION__, x, y, n));
 
-	sna = to_sna_from_drawable(picture->pDrawable);
-	if (is_gpu(sna, picture->pDrawable, PREFER_GPU_SPANS)) {
+	if (priv && is_gpu_dst(priv)) {
 		if (trap_span_converter(sna, picture, x, y, n, t))
 			return;
 	}
@@ -835,8 +841,7 @@ sna_add_traps(PicturePtr picture, INT16 x, INT16 y, int n, xTrap *t)
 	}
 
 	DBG(("%s -- fallback\n", __FUNCTION__));
-	if (sna_drawable_move_to_cpu(picture->pDrawable,
-				     MOVE_READ | MOVE_WRITE)) {
+	if (sna_pixmap_move_to_cpu(pixmap, MOVE_READ | MOVE_WRITE)) {
 		pixman_image_t *image;
 		int dx, dy;
 

@@ -39,7 +39,13 @@
 
 #ifndef XF86_HAS_SCRN_CONV
 #define xf86ScreenToScrn(s) xf86Screens[(s)->myNum]
+#if XORG_VERSION_CURRENT < XORG_VERSION_NUMERIC(1,1,0,0,0)
 #define xf86ScrnToScreen(s) screenInfo.screens[(s)->scrnIndex]
+#else
+#define xf86ScrnToScreen(s) ((s)->pScreen)
+#endif
+#else
+#define xf86ScrnToScreen(s) ((s)->pScreen)
 #endif
 
 #ifndef XF86_SCRN_INTERFACE
@@ -107,6 +113,41 @@
 
 #endif
 
+static inline int
+region_num_rects(const RegionRec *r)
+{
+	return r->data ? r->data->numRects : 1;
+}
+
+static inline int
+region_nil(const RegionRec *r)
+{
+	return region_num_rects(r) == 0;
+}
+
+static inline BoxPtr
+region_boxptr(const RegionRec *r)
+{
+	return (BoxPtr)(r->data + 1);
+}
+
+static inline const BoxRec *
+region_rects(const RegionRec *r)
+{
+	return r->data ? (const BoxRec *)(r->data + 1) :  &r->extents;
+}
+
+inline static void
+region_get_boxes(const RegionRec *r, const BoxRec **s, const BoxRec **e)
+{
+	int n;
+	if (r->data)
+		*s = region_boxptr(r), n = r->data->numRects;
+	else
+		*s = &r->extents, n = 1;
+	*e = *s + n;
+}
+
 #ifndef INCLUDE_LEGACY_REGION_DEFINES
 #define RegionCreate(r, s) REGION_CREATE(NULL, r, s)
 #define RegionBreak(r) REGION_BREAK(NULL, r)
@@ -121,6 +162,7 @@
 #define RegionCopy(res, r) REGION_COPY(NULL, res, r)
 #define RegionIntersect(res, r1, r2) REGION_INTERSECT(NULL, res, r1, r2)
 #define RegionUnion(res, r1, r2) REGION_UNION(NULL, res, r1, r2)
+#define RegionSubtract(res, r1, r2) REGION_SUBTRACT(NULL, res, r1, r2)
 #define RegionTranslate(r, x, y) REGION_TRANSLATE(NULL, r, x, y)
 #define RegionUninit(r) REGION_UNINIT(NULL, r)
 #define region_from_bitmap BITMAP_TO_REGION
@@ -166,4 +208,46 @@ static inline void FreePixmap(PixmapPtr pixmap)
 #define DamageUnregister(d, dd) DamageUnregister(dd)
 #endif
 
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,16,99,1,0)
+
+#define XORG_XV_VERSION 2
+#define ddStopVideo_ARGS XvPortPtr port, DrawablePtr draw
+#define ddSetPortAttribute_ARGS XvPortPtr port, Atom attribute, INT32 value
+#define ddGetPortAttribute_ARGS XvPortPtr port, Atom attribute, INT32 *value
+#define ddQueryBestSize_ARGS XvPortPtr port, CARD8 motion, CARD16 vid_w, CARD16 vid_h, CARD16 drw_w, CARD16 drw_h, unsigned int *p_w, unsigned int *p_h
+#define ddPutImage_ARGS DrawablePtr draw, XvPortPtr port, GCPtr gc, INT16 src_x, INT16 src_y, CARD16 src_w, CARD16 src_h, INT16 drw_x, INT16 drw_y, CARD16 drw_w, CARD16 drw_h, XvImagePtr format, unsigned char *buf, Bool sync, CARD16 width, CARD16 height
+#define ddQueryImageAttributes_ARGS XvPortPtr port, XvImagePtr format, unsigned short *w, unsigned short *h, int *pitches, int *offsets
+
+#else
+
+#define XORG_XV_VERSION 1
+#define ddStopVideo_ARGS ClientPtr client, XvPortPtr port, DrawablePtr draw
+#define ddSetPortAttribute_ARGS ClientPtr client, XvPortPtr port, Atom attribute, INT32 value
+#define ddGetPortAttribute_ARGS ClientPtr client, XvPortPtr port, Atom attribute, INT32 *value
+#define ddQueryBestSize_ARGS ClientPtr client, XvPortPtr port, CARD8 motion, CARD16 vid_w, CARD16 vid_h, CARD16 drw_w, CARD16 drw_h, unsigned int *p_w, unsigned int *p_h
+#define ddPutImage_ARGS ClientPtr client, DrawablePtr draw, XvPortPtr port, GCPtr gc, INT16 src_x, INT16 src_y, CARD16 src_w, CARD16 src_h, INT16 drw_x, INT16 drw_y, CARD16 drw_w, CARD16 drw_h, XvImagePtr format, unsigned char *buf, Bool sync, CARD16 width, CARD16 height
+#define ddQueryImageAttributes_ARGS ClientPtr client, XvPortPtr port, XvImagePtr format, unsigned short *w, unsigned short *h, int *pitches, int *offsets
+
+#endif
+
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,16,99,1,0)
+#include <mi.h>
+#define miHandleExposures(pSrcDrawable, pDstDrawable, \
+			  pGC, srcx, srcy, width, height, \
+			  dstx, dsty, plane) \
+	miHandleExposures(pSrcDrawable, pDstDrawable, \
+			  pGC, srcx, srcy, width, height, \
+			  dstx, dsty)
+#endif
+
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,12,99,901,0)
+#define isGPU(S) (S)->is_gpu
+#else
+#define isGPU(S) 0
+#endif
+
+#endif
+
+#if HAS_DIRTYTRACKING_ROTATION
+#define PixmapSyncDirtyHelper(d, dd) PixmapSyncDirtyHelper(d)
 #endif

@@ -34,6 +34,12 @@
 #include <sys/stat.h>
 #include <sys/ioctl.h>
 
+#if MAJOR_IN_MKDEV
+#include <sys/mkdev.h>
+#elif MAJOR_IN_SYSMACROS
+#include <sys/sysmacros.h>
+#endif
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +48,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+
+#include <xorg-server.h>
 #include <xf86.h>
 #include <pciaccess.h>
 
@@ -72,7 +80,17 @@
  * If only things were as simple as on OpenBSD! :)
  */
 
-#ifdef __OpenBSD__
+void backlight_init(struct backlight *b)
+{
+	b->type = BL_NONE;
+	b->iface = NULL;
+	b->fd = -1;
+	b->pid = -1;
+	b->max = -1;
+	b->has_power = 0;
+}
+
+#ifdef HAVE_DEV_WSCONS_WSCONSIO_H
 
 #include <dev/wscons/wsconsio.h>
 #include <xf86Priv.h>
@@ -134,14 +152,20 @@ int backlight_open(struct backlight *b, char *iface)
 	return param.curval;
 }
 
-enum backlight_type backlight_exists(const char *iface)
+int backlight_exists(const char *iface)
 {
-	if (iface != NULL)
-		return BL_NONE;
-
-	return BL_PLATFORM;
+	return iface == NULL;
 }
 
+int backlight_on(struct backlight *b)
+{
+	return 0;
+}
+
+int backlight_off(struct backlight *b)
+{
+	return 0;
+}
 #else
 
 static int
@@ -191,6 +215,21 @@ __backlight_read(const char *iface, const char *file)
 	return val;
 }
 
+static int
+__backlight_write(const char *iface, const char *file, const char *value)
+{
+	int fd, ret;
+
+	fd = __backlight_open(iface, file, O_WRONLY);
+	if (fd < 0)
+		return -1;
+
+	ret = write(fd, value, strlen(value)+1);
+	close(fd);
+
+	return ret;
+}
+
 /* List of available kernel interfaces in priority order */
 static const char *known_interfaces[] = {
 	"dell_backlight",
@@ -208,10 +247,10 @@ static const char *known_interfaces[] = {
 	"intel_backlight",
 };
 
-static enum backlight_type __backlight_type(const char *iface)
+static int __backlight_type(const char *iface)
 {
 	char buf[1024];
-	int fd, v;
+	int fd, v, i;
 
 	v = -1;
 	fd = __backlight_open(iface, "type", O_RDONLY);
@@ -225,42 +264,44 @@ static enum backlight_type __backlight_type(const char *iface)
 		buf[v] = '\0';
 
 		if (strcmp(buf, "raw") == 0)
-			v = BL_RAW;
+			v = BL_RAW << 8;
 		else if (strcmp(buf, "platform") == 0)
-			v = BL_PLATFORM;
+			v = BL_PLATFORM << 8;
 		else if (strcmp(buf, "firmware") == 0)
-			v = BL_FIRMWARE;
+			v = BL_FIRMWARE << 8;
 		else
-			v = BL_NAMED;
+			v = BL_NAMED << 8;
 	} else
-		v = BL_NAMED;
+		v = BL_NAMED << 8;
 
-	if (v == BL_NAMED) {
-		int i;
-		for (i = 0; i < ARRAY_SIZE(known_interfaces); i++) {
-			if (strcmp(iface, known_interfaces[i]) == 0)
-				break;
-		}
-		v += i;
+	for (i = 0; i < ARRAY_SIZE(known_interfaces); i++) {
+		if (strcmp(iface, known_interfaces[i]) == 0)
+			break;
 	}
+	v += i;
 
 	return v;
 }
 
-enum backlight_type backlight_exists(const char *iface)
+static int __backlight_exists(const char *iface)
 {
 	if (__backlight_read(iface, "brightness") < 0)
-		return BL_NONE;
+		return -1;
 
 	if (__backlight_read(iface, "max_brightness") <= 0)
-		return BL_NONE;
+		return -1;
 
 	return __backlight_type(iface);
 }
 
+int backlight_exists(const char *iface)
+{
+	return __backlight_exists(iface) != -1;
+}
+
 static int __backlight_init(struct backlight *b, char *iface, int fd)
 {
-	b->fd = fd_set_cloexec(fd_set_nonblock(fd));
+	b->fd = fd_move_cloexec(fd_set_nonblock(fd));
 	b->iface = iface;
 	return 1;
 }
@@ -272,6 +313,9 @@ static int __backlight_direct_init(struct backlight *b, char *iface)
 	fd = __backlight_open(iface, "brightness", O_RDWR);
 	if (fd < 0)
 		return 0;
+
+	if (__backlight_read(iface, "bl_power") != -1)
+		b->has_power = 1;
 
 	return __backlight_init(b, iface, fd);
 }
@@ -360,7 +404,10 @@ __backlight_find(void)
 			continue;
 
 		/* Fallback to priority list of known iface for old kernels */
-		v = backlight_exists(de->d_name);
+		v = __backlight_exists(de->d_name);
+		if (v < 0)
+			continue;
+
 		if (v < best_type) {
 			char *copy = strdup(de->d_name);
 			if (copy) {
@@ -377,28 +424,35 @@ __backlight_find(void)
 
 int backlight_open(struct backlight *b, char *iface)
 {
-	int level;
+	int level, type;
 
 	if (iface == NULL)
 		iface = __backlight_find();
 	if (iface == NULL)
-		return -1;
+		goto err;
 
-	b->type = __backlight_type(iface);
+	type = __backlight_type(iface);
+	if (type < 0)
+		goto err;
+	b->type = type >> 8;
 
 	b->max = __backlight_read(iface, "max_brightness");
 	if (b->max <= 0)
-		return -1;
+		goto err;
 
 	level = __backlight_read(iface, "brightness");
 	if (level < 0)
-		return -1;
+		goto err;
 
 	if (!__backlight_direct_init(b, iface) &&
 	    !__backlight_helper_init(b, iface))
-		return -1;
+		goto err;
 
 	return level;
+
+err:
+	backlight_init(b);
+	return -1;
 }
 
 int backlight_set(struct backlight *b, int level)
@@ -433,6 +487,30 @@ int backlight_get(struct backlight *b)
 		level = -1;
 	return level;
 }
+
+int backlight_off(struct backlight *b)
+{
+	if (b->iface == NULL)
+		return 0;
+
+	if (!b->has_power)
+		return 0;
+
+	/* 4 -> FB_BLANK_POWERDOWN */
+	return __backlight_write(b->iface, "bl_power", "4");
+}
+
+int backlight_on(struct backlight *b)
+{
+	if (b->iface == NULL)
+		return 0;
+
+	if (!b->has_power)
+		return 0;
+
+	/* 0 -> FB_BLANK_UNBLANK */
+	return __backlight_write(b->iface, "bl_power", "0");
+}
 #endif
 
 void backlight_disable(struct backlight *b)
@@ -450,7 +528,7 @@ void backlight_disable(struct backlight *b)
 void backlight_close(struct backlight *b)
 {
 	backlight_disable(b);
-	if (b->pid)
+	if (b->pid > 0)
 		waitpid(b->pid, NULL, 0);
 }
 
@@ -476,7 +554,10 @@ char *backlight_find_for_device(struct pci_device *pci)
 		if (*de->d_name == '.')
 			continue;
 
-		v = backlight_exists(de->d_name);
+		v = __backlight_exists(de->d_name);
+		if (v < 0)
+			continue;
+
 		if (v < best_type) {
 			char *copy = strdup(de->d_name);
 			if (copy) {
