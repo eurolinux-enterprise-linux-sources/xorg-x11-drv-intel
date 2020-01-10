@@ -14,7 +14,7 @@
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
 Version:   2.99.911
-Release:   6%{?gitrev}%{?dist}
+Release:   8%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -33,6 +33,7 @@ Patch21: 0002-uxa-mst-support.patch
 Patch23: redhat-intel-crtc-dpms.patch
 Patch24: rhel6-uxa.patch
 Patch25: 0001-configure-Don-t-link-the-driver-against-libX11.patch
+Patch26: 0001-sna-gen8-Clamp-URB-allocations-for-GT3.patch
 Patch100: igt-old-cairo.patch
 
 ExclusiveArch: %{ix86} x86_64 ia64
@@ -87,6 +88,7 @@ Debugging tools for Intel graphics chips
 #patch23 -p1 -b .lid-hack
 %patch24 -p1 -b .uxa
 %patch25 -p1 -b .x11
+%patch26 -p1 -b .bdwgt3
 pushd ../intel-gpu-tools-%{gputoolsdate}
 %patch100 -p1 -b .cairo
 popd
@@ -151,6 +153,12 @@ rm -rf $RPM_BUILD_ROOT
 %{_mandir}/man1/intel_*.1*
 
 %changelog
+* Tue May 05 2015 Adam Jackson <ajax@redhat.com> 2.99.911-8
+- Fix URB allocation sizing on Broadwell GT3
+
+* Thu Feb 26 2015 Adam Jackson <ajax@redhat.com> 2.99.911-7
+- Enable Broadwell acceleration.
+
 * Wed Aug 27 2014 Adam Jackson <ajax@redhat.com> 2.99.911-6
 - Disable accel by default on Broadwell; enable it with Option "NoAccel" "0"
   in xorg.conf.
