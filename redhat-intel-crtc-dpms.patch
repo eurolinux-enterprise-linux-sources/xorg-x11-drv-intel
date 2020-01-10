@@ -1,0 +1,51 @@
+This patch was added for #692776.
+
+I _think_ this patch is only needed because we're carrying the lid-status
+hack in xserver, which proxies lid state into LVDS connectivity.  This,
+combined with the lack of atomic global modeset in KMS, leads to an edge
+case.  If you start with LVDS "disconnected", X will believe that's part
+of its _initial state_, and therefore initial output setup will not try to
+turn LVDS off (since it's already "off").  Opening the lid to go to span
+mode will then not result in the kernel turning LVDS on, since from kernel
+perspective it's already on from console time.
+
+So what this does is catch the X-layer xf86DisableUnusedFunctions, and
+if we notice a CRTC being turned off and not enabled we explicitly pass
+down a "detach framebuffer" ioctl, which gets you onto the NOFB path in
+drm_crtc_helper_set_config to disconnect the connector from the encoder (so
+that, from the kernel's perspective, LVDS truly is off).
+
+In practice I think this is redundant-but-harmless if you don't have a
+lidhacked X server, so on that basis I don't think it's upstreamable.  And
+the real solution ought to involve atomic global modeset anyway, so let's
+not ugly things up elsewhere.
+
+: ajax
+
+diff -up xf86-video-intel-2.20.2/src/intel_display.c.lid-hack xf86-video-intel-2.20.2/src/intel_display.c
+--- xf86-video-intel-2.20.2/src/intel_display.c.lid-hack	2012-07-25 14:37:58.000000000 -0400
++++ xf86-video-intel-2.20.2/src/intel_display.c	2012-08-01 12:25:24.647308219 -0400
+@@ -333,9 +333,23 @@ mode_to_kmode(ScrnInfoPtr scrn,
+ 	kmode->name[DRM_DISPLAY_MODE_LEN-1] = 0;
+ }
+ 
++/* this might be the worst thing */
+ static void
+ intel_crtc_dpms(xf86CrtcPtr crtc, int mode)
+ {
++    int err;
++    struct intel_crtc *intel_crtc = crtc->driver_private;
++    struct intel_mode *imode = intel_crtc->mode;
++
++    if (mode != DPMSModeOff)
++	return;
++
++    if (crtc->enabled)
++	return; /* utterly paranoid */
++
++    err = drmModeSetCrtc(imode->fd, crtc_id(intel_crtc), 0, 0, 0, NULL, 0, NULL);
++    if (err)
++	ErrorF("Well, now what\n");
+ }
+ 
+ void
