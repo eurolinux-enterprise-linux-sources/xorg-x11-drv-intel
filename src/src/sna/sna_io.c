@@ -108,11 +108,15 @@ read_boxes_inplace__cpu(struct kgem *kgem,
 	assert(kgem_bo_can_map__cpu(kgem, bo, false));
 	assert(bo->tiling != I915_TILING_Y);
 
-	src = __kgem_bo_map__cpu(kgem, bo);
+	src = kgem_bo_map__cpu(kgem, bo);
 	if (src == NULL)
 		return false;
 
 	kgem_bo_sync__cpu_full(kgem, bo, 0);
+
+	if (sigtrap_get())
+		return false;
+
 	if (bo->tiling == I915_TILING_X) {
 		assert(kgem->memcpy_from_tiled_x);
 		do {
@@ -131,8 +135,8 @@ read_boxes_inplace__cpu(struct kgem *kgem,
 			box++;
 		} while (--n);
 	}
-	__kgem_bo_unmap__cpu(kgem, bo, src);
 
+	sigtrap_put();
 	return true;
 }
 
@@ -157,6 +161,9 @@ static void read_boxes_inplace(struct kgem *kgem,
 
 	src = kgem_bo_map(kgem, bo);
 	if (src == NULL)
+		return;
+
+	if (sigtrap_get())
 		return;
 
 	assert(src != dst);
@@ -184,6 +191,8 @@ static void read_boxes_inplace(struct kgem *kgem,
 			   box->x2 - box->x1, box->y2 - box->y1);
 		box++;
 	} while (--n);
+
+	sigtrap_put();
 }
 
 static bool download_inplace(struct kgem *kgem,
@@ -216,7 +225,6 @@ void sna_read_boxes(struct sna *sna, PixmapPtr dst, struct kgem_bo *src_bo,
 	BoxRec extents;
 	const BoxRec *tmp_box;
 	int tmp_nbox;
-	char *src;
 	void *ptr;
 	int src_pitch, cpp, offset;
 	int n, cmd, br13;
@@ -269,7 +277,7 @@ fallback:
 		if (box[n].y2 > extents.y2)
 			extents.y2 = box[n].y2;
 	}
-	if (kgem_bo_is_mappable(kgem, src_bo)) {
+	if (kgem_bo_can_map(kgem, src_bo)) {
 		/* Is it worth detiling? */
 		if ((extents.y2 - extents.y1 - 1) * src_bo->pitch < 4096)
 			goto fallback;
@@ -307,6 +315,7 @@ fallback:
 
 			DBG(("%s: tiling download, using %dx%d tiles\n",
 			     __FUNCTION__, step, step));
+			assert(step);
 
 			for (tile.y1 = extents.y1; tile.y1 < extents.y2; tile.y1 = tile.y2) {
 				int y2 = tile.y1 + step;
@@ -365,14 +374,17 @@ fallback:
 					kgem_bo_submit(&sna->kgem, dst_bo);
 					kgem_buffer_read_sync(kgem, dst_bo);
 
-					while (c-- != clipped) {
-						memcpy_blt(ptr, dst->devPrivate.ptr, tmp.drawable.bitsPerPixel,
-							   dst_bo->pitch, dst->devKind,
-							   c->x1 - tile.x1,
-							   c->y1 - tile.y1,
-							   c->x1, c->y1,
-							   c->x2 - c->x1,
-							   c->y2 - c->y1);
+					if (sigtrap_get() == 0) {
+						while (c-- != clipped) {
+							memcpy_blt(ptr, dst->devPrivate.ptr, tmp.drawable.bitsPerPixel,
+								   dst_bo->pitch, dst->devKind,
+								   c->x1 - tile.x1,
+								   c->y1 - tile.y1,
+								   c->x1, c->y1,
+								   c->x2 - c->x1,
+								   c->y2 - c->y1);
+						}
+						sigtrap_put();
 					}
 
 					kgem_bo_destroy(&sna->kgem, dst_bo);
@@ -402,14 +414,17 @@ fallback:
 			kgem_bo_submit(&sna->kgem, dst_bo);
 			kgem_buffer_read_sync(kgem, dst_bo);
 
-			for (n = 0; n < nbox; n++) {
-				memcpy_blt(ptr, dst->devPrivate.ptr, tmp.drawable.bitsPerPixel,
-					   dst_bo->pitch, dst->devKind,
-					   box[n].x1 - extents.x1,
-					   box[n].y1 - extents.y1,
-					   box[n].x1, box[n].y1,
-					   box[n].x2 - box[n].x1,
-					   box[n].y2 - box[n].y1);
+			if (sigtrap_get() == 0) {
+				for (n = 0; n < nbox; n++) {
+					memcpy_blt(ptr, dst->devPrivate.ptr, tmp.drawable.bitsPerPixel,
+						   dst_bo->pitch, dst->devKind,
+						   box[n].x1 - extents.x1,
+						   box[n].y1 - extents.y1,
+						   box[n].x1, box[n].y1,
+						   box[n].x2 - box[n].x1,
+						   box[n].y2 - box[n].y1);
+				}
+				sigtrap_put();
 			}
 
 			kgem_bo_destroy(&sna->kgem, dst_bo);
@@ -451,7 +466,7 @@ fallback:
 	}
 
 	kgem_set_mode(kgem, KGEM_BLT, dst_bo);
-	if (!kgem_check_batch(kgem, 8) ||
+	if (!kgem_check_batch(kgem, 10) ||
 	    !kgem_check_reloc_and_exec(kgem, 2) ||
 	    !kgem_check_many_bo_fenced(kgem, dst_bo, src_bo, NULL)) {
 		kgem_submit(kgem);
@@ -463,91 +478,158 @@ fallback:
 	tmp_nbox = nbox;
 	tmp_box = box;
 	offset = 0;
-	do {
-		int nbox_this_time;
+	if (sna->kgem.gen >= 0100) {
+		cmd |= 8;
+		do {
+			int nbox_this_time;
 
-		nbox_this_time = tmp_nbox;
-		if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
-			nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
-		if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
-			nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
-		assert(nbox_this_time);
-		tmp_nbox -= nbox_this_time;
+			nbox_this_time = tmp_nbox;
+			if (10*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			tmp_nbox -= nbox_this_time;
 
-		for (n = 0; n < nbox_this_time; n++) {
-			int height = tmp_box[n].y2 - tmp_box[n].y1;
-			int width = tmp_box[n].x2 - tmp_box[n].x1;
-			int pitch = PITCH(width, cpp);
-			uint32_t *b = kgem->batch + kgem->nbatch;
+			assert(kgem->mode == KGEM_BLT);
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = tmp_box[n].y2 - tmp_box[n].y1;
+				int width = tmp_box[n].x2 - tmp_box[n].x1;
+				int pitch = PITCH(width, cpp);
+				uint32_t *b = kgem->batch + kgem->nbatch;
 
-			DBG(("    blt offset %x: (%d, %d) x (%d, %d), pitch=%d\n",
-			     offset, tmp_box[n].x1, tmp_box[n].y1,
-			     width, height, pitch));
+				DBG(("    blt offset %x: (%d, %d) x (%d, %d), pitch=%d\n",
+				     offset,
+				     tmp_box[n].x1, tmp_box[n].y1,
+				     width, height, pitch));
 
-			assert(tmp_box[n].x1 >= 0);
-			assert(tmp_box[n].x2 * dst->drawable.bitsPerPixel/8 <= src_bo->pitch);
-			assert(tmp_box[n].y1 >= 0);
-			assert(tmp_box[n].y2 * src_bo->pitch <= kgem_bo_size(src_bo));
+				assert(tmp_box[n].x1 >= 0);
+				assert(tmp_box[n].x2 * dst->drawable.bitsPerPixel/8 <= src_bo->pitch);
+				assert(tmp_box[n].y1 >= 0);
+				assert(tmp_box[n].y2 * src_bo->pitch <= kgem_bo_size(src_bo));
 
-			b[0] = cmd;
-			b[1] = br13 | pitch;
-			b[2] = 0;
-			b[3] = height << 16 | width;
-			b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      I915_GEM_DOMAIN_RENDER |
-					      KGEM_RELOC_FENCED,
-					      offset);
-			b[5] = tmp_box[n].y1 << 16 | tmp_box[n].x1;
-			b[6] = src_pitch;
-			b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      KGEM_RELOC_FENCED,
-					      0);
-			kgem->nbatch += 8;
+				b[0] = cmd;
+				b[1] = br13 | pitch;
+				b[2] = 0;
+				b[3] = height << 16 | width;
+				*(uint64_t *)(b+4) =
+					kgem_add_reloc64(kgem, kgem->nbatch + 4, dst_bo,
+							 I915_GEM_DOMAIN_RENDER << 16 |
+							 I915_GEM_DOMAIN_RENDER |
+							 KGEM_RELOC_FENCED,
+							 offset);
+				b[6] = tmp_box[n].y1 << 16 | tmp_box[n].x1;
+				b[7] = src_pitch;
+				*(uint64_t *)(b+8) =
+					kgem_add_reloc64(kgem, kgem->nbatch + 8, src_bo,
+							 I915_GEM_DOMAIN_RENDER << 16 |
+							 KGEM_RELOC_FENCED,
+							 0);
+				kgem->nbatch += 10;
 
-			offset += pitch * height;
-		}
+				offset += pitch * height;
+			}
 
-		_kgem_submit(kgem);
-		if (!tmp_nbox)
-			break;
+			_kgem_submit(kgem);
+			if (!tmp_nbox)
+				break;
 
-		_kgem_set_mode(kgem, KGEM_BLT);
-		tmp_box += nbox_this_time;
-	} while (1);
+			_kgem_set_mode(kgem, KGEM_BLT);
+			tmp_box += nbox_this_time;
+		} while (1);
+	} else {
+		cmd |= 6;
+		do {
+			int nbox_this_time;
+
+			nbox_this_time = tmp_nbox;
+			if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			tmp_nbox -= nbox_this_time;
+
+			assert(kgem->mode == KGEM_BLT);
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = tmp_box[n].y2 - tmp_box[n].y1;
+				int width = tmp_box[n].x2 - tmp_box[n].x1;
+				int pitch = PITCH(width, cpp);
+				uint32_t *b = kgem->batch + kgem->nbatch;
+
+				DBG(("    blt offset %x: (%d, %d) x (%d, %d), pitch=%d\n",
+				     offset,
+				     tmp_box[n].x1, tmp_box[n].y1,
+				     width, height, pitch));
+
+				assert(tmp_box[n].x1 >= 0);
+				assert(tmp_box[n].x2 * dst->drawable.bitsPerPixel/8 <= src_bo->pitch);
+				assert(tmp_box[n].y1 >= 0);
+				assert(tmp_box[n].y2 * src_bo->pitch <= kgem_bo_size(src_bo));
+
+				b[0] = cmd;
+				b[1] = br13 | pitch;
+				b[2] = 0;
+				b[3] = height << 16 | width;
+				b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      I915_GEM_DOMAIN_RENDER |
+						      KGEM_RELOC_FENCED,
+						      offset);
+				b[5] = tmp_box[n].y1 << 16 | tmp_box[n].x1;
+				b[6] = src_pitch;
+				b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      KGEM_RELOC_FENCED,
+						      0);
+				kgem->nbatch += 8;
+
+				offset += pitch * height;
+			}
+
+			_kgem_submit(kgem);
+			if (!tmp_nbox)
+				break;
+
+			_kgem_set_mode(kgem, KGEM_BLT);
+			tmp_box += nbox_this_time;
+		} while (1);
+	}
 	assert(offset == __kgem_buffer_size(dst_bo));
 
 	kgem_buffer_read_sync(kgem, dst_bo);
 
-	src = ptr;
-	do {
-		int height = box->y2 - box->y1;
-		int width  = box->x2 - box->x1;
-		int pitch = PITCH(width, cpp);
+	if (sigtrap_get() == 0) {
+		char *src = ptr;
+		do {
+			int height = box->y2 - box->y1;
+			int width  = box->x2 - box->x1;
+			int pitch = PITCH(width, cpp);
 
-		DBG(("    copy offset %lx [%08x...%08x...%08x]: (%d, %d) x (%d, %d), src pitch=%d, dst pitch=%d, bpp=%d\n",
-		     (long)((char *)src - (char *)ptr),
-		     *(uint32_t*)src, *(uint32_t*)(src+pitch*height/2 + pitch/2 - 4), *(uint32_t*)(src+pitch*height - 4),
-		     box->x1, box->y1,
-		     width, height,
-		     pitch, dst->devKind, cpp*8));
+			DBG(("    copy offset %lx [%08x...%08x...%08x]: (%d, %d) x (%d, %d), src pitch=%d, dst pitch=%d, bpp=%d\n",
+			     (long)((char *)src - (char *)ptr),
+			     *(uint32_t*)src, *(uint32_t*)(src+pitch*height/2 + pitch/2 - 4), *(uint32_t*)(src+pitch*height - 4),
+			     box->x1, box->y1,
+			     width, height,
+			     pitch, dst->devKind, cpp*8));
 
-		assert(box->x1 >= 0);
-		assert(box->x2 <= dst->drawable.width);
-		assert(box->y1 >= 0);
-		assert(box->y2 <= dst->drawable.height);
+			assert(box->x1 >= 0);
+			assert(box->x2 <= dst->drawable.width);
+			assert(box->y1 >= 0);
+			assert(box->y2 <= dst->drawable.height);
 
-		memcpy_blt(src, dst->devPrivate.ptr, cpp*8,
-			   pitch, dst->devKind,
-			   0, 0,
-			   box->x1, box->y1,
-			   width, height);
-		box++;
+			memcpy_blt(src, dst->devPrivate.ptr, cpp*8,
+				   pitch, dst->devKind,
+				   0, 0,
+				   box->x1, box->y1,
+				   width, height);
+			box++;
 
-		src += pitch * height;
-	} while (--nbox);
-	assert(src - (char *)ptr == __kgem_buffer_size(dst_bo));
+			src += pitch * height;
+		} while (--nbox);
+		assert(src - (char *)ptr == __kgem_buffer_size(dst_bo));
+		sigtrap_put();
+	}
 	kgem_bo_destroy(kgem, dst_bo);
 	sna->blt_state.fill_bo = 0;
 }
@@ -571,13 +653,18 @@ write_boxes_inplace__tiled(struct kgem *kgem,
 {
 	uint8_t *dst;
 
+	assert(kgem_bo_can_map__cpu(kgem, bo, true));
 	assert(bo->tiling == I915_TILING_X);
 
-	dst = __kgem_bo_map__cpu(kgem, bo);
+	dst = kgem_bo_map__cpu(kgem, bo);
 	if (dst == NULL)
 		return false;
 
 	kgem_bo_sync__cpu(kgem, bo);
+
+	if (sigtrap_get())
+		return false;
+
 	do {
 		memcpy_to_tiled_x(kgem, src, dst, bpp, stride, bo->pitch,
 				  box->x1 + src_dx, box->y1 + src_dy,
@@ -585,8 +672,8 @@ write_boxes_inplace__tiled(struct kgem *kgem,
 				  box->x2 - box->x1, box->y2 - box->y1);
 		box++;
 	} while (--n);
-	__kgem_bo_unmap__cpu(kgem, bo, dst);
 
+	sigtrap_put();
 	return true;
 }
 
@@ -616,6 +703,9 @@ static bool write_boxes_inplace(struct kgem *kgem,
 
 	assert(dst != src);
 
+	if (sigtrap_get())
+		return false;
+
 	do {
 		DBG(("%s: (%d, %d) -> (%d, %d) x (%d, %d) [bpp=%d, src_pitch=%d, dst_pitch=%d]\n", __FUNCTION__,
 		     box->x1 + src_dx, box->y1 + src_dy,
@@ -642,6 +732,8 @@ static bool write_boxes_inplace(struct kgem *kgem,
 			   box->x2 - box->x1, box->y2 - box->y1);
 		box++;
 	} while (--n);
+
+	sigtrap_put();
 	return true;
 }
 
@@ -699,13 +791,15 @@ bool sna_write_boxes(struct sna *sna, PixmapPtr dst,
 
 	DBG(("%s x %d, src stride=%d,  src dx=(%d, %d)\n", __FUNCTION__, nbox, stride, src_dx, src_dy));
 
-	if (upload_inplace(kgem, dst_bo, box, nbox, dst->drawable.bitsPerPixel)) {
-fallback:
-		return write_boxes_inplace(kgem,
-					   src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
-					   dst_bo, dst_dx, dst_dy,
-					   box, nbox);
-	}
+	if (upload_inplace(kgem, dst_bo, box, nbox, dst->drawable.bitsPerPixel) &&
+	    write_boxes_inplace(kgem,
+				src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
+				dst_bo, dst_dx, dst_dy,
+				box, nbox))
+		return true;
+
+	if (wedged(sna))
+		return false;
 
 	can_blt = kgem_bo_can_blt(kgem, dst_bo) &&
 		(box[0].x2 - box[0].x1) * dst->drawable.bitsPerPixel < 8 * (MAXSHORT - 4);
@@ -745,7 +839,7 @@ fallback:
 		     tmp.drawable.width, tmp.drawable.height,
 		     sna->render.max_3d_size, sna->render.max_3d_size));
 		if (must_tile(sna, tmp.drawable.width, tmp.drawable.height)) {
-			BoxRec tile, stack[64], *clipped, *c;
+			BoxRec tile, stack[64], *clipped;
 			int cpp, step;
 
 tile:
@@ -757,6 +851,7 @@ tile:
 
 			if (step * cpp > 4096)
 				step = 4096 / cpp;
+			assert(step);
 
 			DBG(("%s: tiling upload, using %dx%d tiles\n",
 			     __FUNCTION__, step, step));
@@ -795,37 +890,41 @@ tile:
 						goto fallback;
 					}
 
-					c = clipped;
-					for (n = 0; n < nbox; n++) {
-						*c = box[n];
-						if (!box_intersect(c, &tile))
-							continue;
+					if (sigtrap_get() == 0) {
+						BoxRec *c = clipped;
+						for (n = 0; n < nbox; n++) {
+							*c = box[n];
+							if (!box_intersect(c, &tile))
+								continue;
 
-						DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
-						     __FUNCTION__,
-						     c->x1, c->y1,
-						     c->x2, c->y2,
-						     src_dx, src_dy,
-						     c->x1 - tile.x1,
-						     c->y1 - tile.y1));
-						memcpy_blt(src, ptr, tmp.drawable.bitsPerPixel,
-							   stride, src_bo->pitch,
-							   c->x1 + src_dx,
-							   c->y1 + src_dy,
-							   c->x1 - tile.x1,
-							   c->y1 - tile.y1,
-							   c->x2 - c->x1,
-							   c->y2 - c->y1);
-						c++;
-					}
+							DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
+							     __FUNCTION__,
+							     c->x1, c->y1,
+							     c->x2, c->y2,
+							     src_dx, src_dy,
+							     c->x1 - tile.x1,
+							     c->y1 - tile.y1));
+							memcpy_blt(src, ptr, tmp.drawable.bitsPerPixel,
+								   stride, src_bo->pitch,
+								   c->x1 + src_dx,
+								   c->y1 + src_dy,
+								   c->x1 - tile.x1,
+								   c->y1 - tile.y1,
+								   c->x2 - c->x1,
+								   c->y2 - c->y1);
+							c++;
+						}
 
-					if (c != clipped)
-						n = sna->render.copy_boxes(sna, GXcopy,
-									   &tmp, src_bo, -tile.x1, -tile.y1,
-									   dst, dst_bo, dst_dx, dst_dy,
-									   clipped, c - clipped, 0);
-					else
-						n = 1;
+						if (c != clipped)
+							n = sna->render.copy_boxes(sna, GXcopy,
+										   &tmp, src_bo, -tile.x1, -tile.y1,
+										   dst, dst_bo, dst_dx, dst_dy,
+										   clipped, c - clipped, 0);
+						else
+							n = 1;
+						sigtrap_put();
+					} else
+						n = 0;
 
 					kgem_bo_destroy(&sna->kgem, src_bo);
 
@@ -849,28 +948,32 @@ tile:
 			if (!src_bo)
 				goto fallback;
 
-			for (n = 0; n < nbox; n++) {
-				DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
-				     __FUNCTION__,
-				     box[n].x1, box[n].y1,
-				     box[n].x2, box[n].y2,
-				     src_dx, src_dy,
-				     box[n].x1 - extents.x1,
-				     box[n].y1 - extents.y1));
-				memcpy_blt(src, ptr, tmp.drawable.bitsPerPixel,
-					   stride, src_bo->pitch,
-					   box[n].x1 + src_dx,
-					   box[n].y1 + src_dy,
-					   box[n].x1 - extents.x1,
-					   box[n].y1 - extents.y1,
-					   box[n].x2 - box[n].x1,
-					   box[n].y2 - box[n].y1);
-			}
+			if (sigtrap_get() == 0) {
+				for (n = 0; n < nbox; n++) {
+					DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
+					     __FUNCTION__,
+					     box[n].x1, box[n].y1,
+					     box[n].x2, box[n].y2,
+					     src_dx, src_dy,
+					     box[n].x1 - extents.x1,
+					     box[n].y1 - extents.y1));
+					memcpy_blt(src, ptr, tmp.drawable.bitsPerPixel,
+						   stride, src_bo->pitch,
+						   box[n].x1 + src_dx,
+						   box[n].y1 + src_dy,
+						   box[n].x1 - extents.x1,
+						   box[n].y1 - extents.y1,
+						   box[n].x2 - box[n].x1,
+						   box[n].y2 - box[n].y1);
+				}
 
-			n = sna->render.copy_boxes(sna, GXcopy,
-						   &tmp, src_bo, -extents.x1, -extents.y1,
-						   dst, dst_bo, dst_dx, dst_dy,
-						   box, nbox, 0);
+				n = sna->render.copy_boxes(sna, GXcopy,
+							   &tmp, src_bo, -extents.x1, -extents.y1,
+							   dst, dst_bo, dst_dx, dst_dy,
+							   box, nbox, 0);
+				sigtrap_put();
+			} else
+				n = 0;
 
 			kgem_bo_destroy(&sna->kgem, src_bo);
 
@@ -897,7 +1000,7 @@ tile:
 	}
 
 	kgem_set_mode(kgem, KGEM_BLT, dst_bo);
-	if (!kgem_check_batch(kgem, 8) ||
+	if (!kgem_check_batch(kgem, 10) ||
 	    !kgem_check_reloc_and_exec(kgem, 2) ||
 	    !kgem_check_bo_fenced(kgem, dst_bo)) {
 		kgem_submit(kgem);
@@ -906,97 +1009,206 @@ tile:
 		_kgem_set_mode(kgem, KGEM_BLT);
 	}
 
-	do {
-		int nbox_this_time;
-
-		nbox_this_time = nbox;
-		if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
-			nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
-		if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
-			nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
-		assert(nbox_this_time);
-		nbox -= nbox_this_time;
-
-		/* Count the total number of bytes to be read and allocate a
-		 * single buffer large enough. Or if it is very small, combine
-		 * with other allocations. */
-		offset = 0;
-		for (n = 0; n < nbox_this_time; n++) {
-			int height = box[n].y2 - box[n].y1;
-			int width = box[n].x2 - box[n].x1;
-			offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
-		}
-
-		src_bo = kgem_create_buffer(kgem, offset,
-					    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
-					    &ptr);
-		if (!src_bo)
-			break;
-
-		offset = 0;
+	if (kgem->gen >= 0100) {
+		cmd |= 8;
 		do {
-			int height = box->y2 - box->y1;
-			int width = box->x2 - box->x1;
-			int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
-			uint32_t *b;
+			int nbox_this_time;
 
-			DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
-			     __FUNCTION__,
-			     box->x1 + src_dx, box->y1 + src_dy,
-			     box->x1 + dst_dx, box->y1 + dst_dy,
-			     width, height,
-			     offset, pitch));
+			nbox_this_time = nbox;
+			if (10*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			nbox -= nbox_this_time;
 
-			assert(box->x1 + src_dx >= 0);
-			assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
-			assert(box->y1 + src_dy >= 0);
+			/* Count the total number of bytes to be read and allocate a
+			 * single buffer large enough. Or if it is very small, combine
+			 * with other allocations. */
+			offset = 0;
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = box[n].y2 - box[n].y1;
+				int width = box[n].x2 - box[n].x1;
+				offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
+			}
 
-			assert(box->x1 + dst_dx >= 0);
-			assert(box->y1 + dst_dy >= 0);
+			src_bo = kgem_create_buffer(kgem, offset,
+						    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
+						    &ptr);
+			if (!src_bo)
+				break;
 
-			memcpy_blt(src, (char *)ptr + offset,
-				   dst->drawable.bitsPerPixel,
-				   stride, pitch,
-				   box->x1 + src_dx, box->y1 + src_dy,
-				   0, 0,
-				   width, height);
+			if (sigtrap_get() == 0) {
+				offset = 0;
+				do {
+					int height = box->y2 - box->y1;
+					int width = box->x2 - box->x1;
+					int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
+					uint32_t *b;
 
-			b = kgem->batch + kgem->nbatch;
-			b[0] = cmd;
-			b[1] = br13;
-			b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
-			b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
-			b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      I915_GEM_DOMAIN_RENDER |
-					      KGEM_RELOC_FENCED,
-					      0);
-			b[5] = 0;
-			b[6] = pitch;
-			b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      KGEM_RELOC_FENCED,
-					      offset);
-			kgem->nbatch += 8;
+					DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
+					     __FUNCTION__,
+					     box->x1 + src_dx, box->y1 + src_dy,
+					     box->x1 + dst_dx, box->y1 + dst_dy,
+					     width, height,
+					     offset, pitch));
 
-			box++;
-			offset += pitch * height;
-		} while (--nbox_this_time);
-		assert(offset == __kgem_buffer_size(src_bo));
+					assert(box->x1 + src_dx >= 0);
+					assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
+					assert(box->y1 + src_dy >= 0);
 
-		if (nbox) {
-			_kgem_submit(kgem);
-			_kgem_set_mode(kgem, KGEM_BLT);
-		}
+					assert(box->x1 + dst_dx >= 0);
+					assert(box->y1 + dst_dy >= 0);
 
-		kgem_bo_destroy(kgem, src_bo);
-	} while (nbox);
+					memcpy_blt(src, (char *)ptr + offset,
+						   dst->drawable.bitsPerPixel,
+						   stride, pitch,
+						   box->x1 + src_dx, box->y1 + src_dy,
+						   0, 0,
+						   width, height);
+
+					assert(kgem->mode == KGEM_BLT);
+					b = kgem->batch + kgem->nbatch;
+					b[0] = cmd;
+					b[1] = br13;
+					b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
+					b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
+					*(uint64_t *)(b+4) =
+						kgem_add_reloc64(kgem, kgem->nbatch + 4, dst_bo,
+								 I915_GEM_DOMAIN_RENDER << 16 |
+								 I915_GEM_DOMAIN_RENDER |
+								 KGEM_RELOC_FENCED,
+								 0);
+					b[6] = 0;
+					b[7] = pitch;
+					*(uint64_t *)(b+8) =
+						kgem_add_reloc64(kgem, kgem->nbatch + 8, src_bo,
+								 I915_GEM_DOMAIN_RENDER << 16 |
+								 KGEM_RELOC_FENCED,
+								 offset);
+					kgem->nbatch += 10;
+
+					box++;
+					offset += pitch * height;
+				} while (--nbox_this_time);
+				assert(offset == __kgem_buffer_size(src_bo));
+				sigtrap_put();
+			}
+
+			if (nbox) {
+				_kgem_submit(kgem);
+				_kgem_set_mode(kgem, KGEM_BLT);
+			}
+
+			kgem_bo_destroy(kgem, src_bo);
+		} while (nbox);
+	} else {
+		cmd |= 6;
+		do {
+			int nbox_this_time;
+
+			nbox_this_time = nbox;
+			if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			nbox -= nbox_this_time;
+
+			/* Count the total number of bytes to be read and allocate a
+			 * single buffer large enough. Or if it is very small, combine
+			 * with other allocations. */
+			offset = 0;
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = box[n].y2 - box[n].y1;
+				int width = box[n].x2 - box[n].x1;
+				offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
+			}
+
+			src_bo = kgem_create_buffer(kgem, offset,
+						    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
+						    &ptr);
+			if (!src_bo)
+				break;
+
+			if (sigtrap_get()) {
+				kgem_bo_destroy(kgem, src_bo);
+				goto fallback;
+			}
+
+			offset = 0;
+			do {
+				int height = box->y2 - box->y1;
+				int width = box->x2 - box->x1;
+				int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
+				uint32_t *b;
+
+				DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
+				     __FUNCTION__,
+				     box->x1 + src_dx, box->y1 + src_dy,
+				     box->x1 + dst_dx, box->y1 + dst_dy,
+				     width, height,
+				     offset, pitch));
+
+				assert(box->x1 + src_dx >= 0);
+				assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
+				assert(box->y1 + src_dy >= 0);
+
+				assert(box->x1 + dst_dx >= 0);
+				assert(box->y1 + dst_dy >= 0);
+
+				memcpy_blt(src, (char *)ptr + offset,
+					   dst->drawable.bitsPerPixel,
+					   stride, pitch,
+					   box->x1 + src_dx, box->y1 + src_dy,
+					   0, 0,
+					   width, height);
+
+				assert(kgem->mode == KGEM_BLT);
+				b = kgem->batch + kgem->nbatch;
+				b[0] = cmd;
+				b[1] = br13;
+				b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
+				b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
+				b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      I915_GEM_DOMAIN_RENDER |
+						      KGEM_RELOC_FENCED,
+						      0);
+				b[5] = 0;
+				b[6] = pitch;
+				b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      KGEM_RELOC_FENCED,
+						      offset);
+				kgem->nbatch += 8;
+
+				box++;
+				offset += pitch * height;
+			} while (--nbox_this_time);
+			assert(offset == __kgem_buffer_size(src_bo));
+			sigtrap_put();
+
+			if (nbox) {
+				_kgem_submit(kgem);
+				_kgem_set_mode(kgem, KGEM_BLT);
+			}
+
+			kgem_bo_destroy(kgem, src_bo);
+		} while (nbox);
+	}
 
 	sna->blt_state.fill_bo = 0;
 	return true;
+
+fallback:
+	return write_boxes_inplace(kgem,
+				   src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
+				   dst_bo, dst_dx, dst_dy,
+				   box, nbox);
 }
 
-static void
+static bool
 write_boxes_inplace__xor(struct kgem *kgem,
 			 const void *src, int stride, int bpp, int16_t src_dx, int16_t src_dy,
 			 struct kgem_bo *bo, int16_t dst_dx, int16_t dst_dy,
@@ -1007,11 +1219,17 @@ write_boxes_inplace__xor(struct kgem *kgem,
 
 	DBG(("%s x %d, tiling=%d\n", __FUNCTION__, n, bo->tiling));
 
+	if (!kgem_bo_can_map(kgem, bo))
+		return false;
+
 	kgem_bo_submit(kgem, bo);
 
 	dst = kgem_bo_map(kgem, bo);
 	if (dst == NULL)
-		return;
+		return false;
+
+	if (sigtrap_get())
+		return false;
 
 	do {
 		DBG(("%s: (%d, %d) -> (%d, %d) x (%d, %d) [bpp=%d, src_pitch=%d, dst_pitch=%d]\n", __FUNCTION__,
@@ -1040,6 +1258,9 @@ write_boxes_inplace__xor(struct kgem *kgem,
 			   and, or);
 		box++;
 	} while (--n);
+
+	sigtrap_put();
+	return true;
 }
 
 static bool upload_inplace__xor(struct kgem *kgem,
@@ -1056,7 +1277,7 @@ static bool upload_inplace__xor(struct kgem *kgem,
 	return __upload_inplace(kgem, bo, box, n, bpp);
 }
 
-void sna_write_boxes__xor(struct sna *sna, PixmapPtr dst,
+bool sna_write_boxes__xor(struct sna *sna, PixmapPtr dst,
 			  struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 			  const void *src, int stride, int16_t src_dx, int16_t src_dy,
 			  const BoxRec *box, int nbox,
@@ -1072,15 +1293,16 @@ void sna_write_boxes__xor(struct sna *sna, PixmapPtr dst,
 
 	DBG(("%s x %d\n", __FUNCTION__, nbox));
 
-	if (upload_inplace__xor(kgem, dst_bo, box, nbox, dst->drawable.bitsPerPixel)) {
-fallback:
-		write_boxes_inplace__xor(kgem,
-					 src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
-					 dst_bo, dst_dx, dst_dy,
-					 box, nbox,
-					 and, or);
-		return;
-	}
+	if (upload_inplace__xor(kgem, dst_bo, box, nbox, dst->drawable.bitsPerPixel) &&
+	    write_boxes_inplace__xor(kgem,
+				     src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
+				     dst_bo, dst_dx, dst_dy,
+				     box, nbox,
+				     and, or))
+		return true;
+
+	if (wedged(sna))
+		return false;
 
 	can_blt = kgem_bo_can_blt(kgem, dst_bo) &&
 		(box[0].x2 - box[0].x1) * dst->drawable.bitsPerPixel < 8 * (MAXSHORT - 4);
@@ -1120,7 +1342,7 @@ fallback:
 		     tmp.drawable.width, tmp.drawable.height,
 		     sna->render.max_3d_size, sna->render.max_3d_size));
 		if (must_tile(sna, tmp.drawable.width, tmp.drawable.height)) {
-			BoxRec tile, stack[64], *clipped, *c;
+			BoxRec tile, stack[64], *clipped;
 			int step;
 
 tile:
@@ -1131,6 +1353,7 @@ tile:
 
 			DBG(("%s: tiling upload, using %dx%d tiles\n",
 			     __FUNCTION__, step, step));
+			assert(step);
 
 			if (n > ARRAY_SIZE(stack)) {
 				clipped = malloc(sizeof(BoxRec) * n);
@@ -1166,38 +1389,43 @@ tile:
 						goto fallback;
 					}
 
-					c = clipped;
-					for (n = 0; n < nbox; n++) {
-						*c = box[n];
-						if (!box_intersect(c, &tile))
-							continue;
+					if (sigtrap_get() == 0) {
+						BoxRec *c = clipped;
+						for (n = 0; n < nbox; n++) {
+							*c = box[n];
+							if (!box_intersect(c, &tile))
+								continue;
 
-						DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
-						     __FUNCTION__,
-						     c->x1, c->y1,
-						     c->x2, c->y2,
-						     src_dx, src_dy,
-						     c->x1 - tile.x1,
-						     c->y1 - tile.y1));
-						memcpy_xor(src, ptr, tmp.drawable.bitsPerPixel,
-							   stride, src_bo->pitch,
-							   c->x1 + src_dx,
-							   c->y1 + src_dy,
-							   c->x1 - tile.x1,
-							   c->y1 - tile.y1,
-							   c->x2 - c->x1,
-							   c->y2 - c->y1,
-							   and, or);
-						c++;
-					}
+							DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
+							     __FUNCTION__,
+							     c->x1, c->y1,
+							     c->x2, c->y2,
+							     src_dx, src_dy,
+							     c->x1 - tile.x1,
+							     c->y1 - tile.y1));
+							memcpy_xor(src, ptr, tmp.drawable.bitsPerPixel,
+								   stride, src_bo->pitch,
+								   c->x1 + src_dx,
+								   c->y1 + src_dy,
+								   c->x1 - tile.x1,
+								   c->y1 - tile.y1,
+								   c->x2 - c->x1,
+								   c->y2 - c->y1,
+								   and, or);
+							c++;
+						}
 
-					if (c != clipped)
-						n = sna->render.copy_boxes(sna, GXcopy,
-									   &tmp, src_bo, -tile.x1, -tile.y1,
-									   dst, dst_bo, dst_dx, dst_dy,
-									   clipped, c - clipped, 0);
-					else
-						n = 1;
+						if (c != clipped)
+							n = sna->render.copy_boxes(sna, GXcopy,
+										   &tmp, src_bo, -tile.x1, -tile.y1,
+										   dst, dst_bo, dst_dx, dst_dy,
+										   clipped, c - clipped, 0);
+						else
+							n = 1;
+
+						sigtrap_put();
+					} else
+						n = 0;
 
 					kgem_bo_destroy(&sna->kgem, src_bo);
 
@@ -1221,29 +1449,33 @@ tile:
 			if (!src_bo)
 				goto fallback;
 
-			for (n = 0; n < nbox; n++) {
-				DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
-				     __FUNCTION__,
-				     box[n].x1, box[n].y1,
-				     box[n].x2, box[n].y2,
-				     src_dx, src_dy,
-				     box[n].x1 - extents.x1,
-				     box[n].y1 - extents.y1));
-				memcpy_xor(src, ptr, tmp.drawable.bitsPerPixel,
-					   stride, src_bo->pitch,
-					   box[n].x1 + src_dx,
-					   box[n].y1 + src_dy,
-					   box[n].x1 - extents.x1,
-					   box[n].y1 - extents.y1,
-					   box[n].x2 - box[n].x1,
-					   box[n].y2 - box[n].y1,
-					   and, or);
-			}
+			if (sigtrap_get() == 0) {
+				for (n = 0; n < nbox; n++) {
+					DBG(("%s: box(%d, %d), (%d, %d), src=(%d, %d), dst=(%d, %d)\n",
+					     __FUNCTION__,
+					     box[n].x1, box[n].y1,
+					     box[n].x2, box[n].y2,
+					     src_dx, src_dy,
+					     box[n].x1 - extents.x1,
+					     box[n].y1 - extents.y1));
+					memcpy_xor(src, ptr, tmp.drawable.bitsPerPixel,
+						   stride, src_bo->pitch,
+						   box[n].x1 + src_dx,
+						   box[n].y1 + src_dy,
+						   box[n].x1 - extents.x1,
+						   box[n].y1 - extents.y1,
+						   box[n].x2 - box[n].x1,
+						   box[n].y2 - box[n].y1,
+						   and, or);
+				}
 
-			n = sna->render.copy_boxes(sna, GXcopy,
-						   &tmp, src_bo, -extents.x1, -extents.y1,
-						   dst, dst_bo, dst_dx, dst_dy,
-						   box, nbox, 0);
+				n = sna->render.copy_boxes(sna, GXcopy,
+							   &tmp, src_bo, -extents.x1, -extents.y1,
+							   dst, dst_bo, dst_dx, dst_dy,
+							   box, nbox, 0);
+				sigtrap_put();
+			} else
+				n = 0;
 
 			kgem_bo_destroy(&sna->kgem, src_bo);
 
@@ -1251,7 +1483,7 @@ tile:
 				goto tile;
 		}
 
-		return;
+		return true;
 	}
 
 	cmd = XY_SRC_COPY_BLT_CMD;
@@ -1270,7 +1502,7 @@ tile:
 	}
 
 	kgem_set_mode(kgem, KGEM_BLT, dst_bo);
-	if (!kgem_check_batch(kgem, 8) ||
+	if (!kgem_check_batch(kgem, 10) ||
 	    !kgem_check_reloc_and_exec(kgem, 2) ||
 	    !kgem_check_bo_fenced(kgem, dst_bo)) {
 		kgem_submit(kgem);
@@ -1279,94 +1511,209 @@ tile:
 		_kgem_set_mode(kgem, KGEM_BLT);
 	}
 
-	do {
-		int nbox_this_time;
-
-		nbox_this_time = nbox;
-		if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
-			nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
-		if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
-			nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
-		assert(nbox_this_time);
-		nbox -= nbox_this_time;
-
-		/* Count the total number of bytes to be read and allocate a
-		 * single buffer large enough. Or if it is very small, combine
-		 * with other allocations. */
-		offset = 0;
-		for (n = 0; n < nbox_this_time; n++) {
-			int height = box[n].y2 - box[n].y1;
-			int width = box[n].x2 - box[n].x1;
-			offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
-		}
-
-		src_bo = kgem_create_buffer(kgem, offset,
-					    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
-					    &ptr);
-		if (!src_bo)
-			break;
-
-		offset = 0;
+	if (sna->kgem.gen >= 0100) {
+		cmd |= 8;
 		do {
-			int height = box->y2 - box->y1;
-			int width = box->x2 - box->x1;
-			int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
-			uint32_t *b;
+			int nbox_this_time;
 
-			DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
-			     __FUNCTION__,
-			     box->x1 + src_dx, box->y1 + src_dy,
-			     box->x1 + dst_dx, box->y1 + dst_dy,
-			     width, height,
-			     offset, pitch));
+			nbox_this_time = nbox;
+			if (10*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			nbox -= nbox_this_time;
 
-			assert(box->x1 + src_dx >= 0);
-			assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
-			assert(box->y1 + src_dy >= 0);
+			/* Count the total number of bytes to be read and allocate a
+			 * single buffer large enough. Or if it is very small, combine
+			 * with other allocations. */
+			offset = 0;
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = box[n].y2 - box[n].y1;
+				int width = box[n].x2 - box[n].x1;
+				offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
+			}
 
-			assert(box->x1 + dst_dx >= 0);
-			assert(box->y1 + dst_dy >= 0);
+			src_bo = kgem_create_buffer(kgem, offset,
+						    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
+						    &ptr);
+			if (!src_bo)
+				goto fallback;
 
-			memcpy_xor(src, (char *)ptr + offset,
-				   dst->drawable.bitsPerPixel,
-				   stride, pitch,
-				   box->x1 + src_dx, box->y1 + src_dy,
-				   0, 0,
-				   width, height,
-				   and, or);
+			if (sigtrap_get()) {
+				kgem_bo_destroy(kgem, src_bo);
+				goto fallback;
+			}
 
-			b = kgem->batch + kgem->nbatch;
-			b[0] = cmd;
-			b[1] = br13;
-			b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
-			b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
-			b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      I915_GEM_DOMAIN_RENDER |
-					      KGEM_RELOC_FENCED,
-					      0);
-			b[5] = 0;
-			b[6] = pitch;
-			b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
-					      I915_GEM_DOMAIN_RENDER << 16 |
-					      KGEM_RELOC_FENCED,
-					      offset);
-			kgem->nbatch += 8;
+			offset = 0;
+			do {
+				int height = box->y2 - box->y1;
+				int width = box->x2 - box->x1;
+				int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
+				uint32_t *b;
 
-			box++;
-			offset += pitch * height;
-		} while (--nbox_this_time);
-		assert(offset == __kgem_buffer_size(src_bo));
+				DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
+				     __FUNCTION__,
+				     box->x1 + src_dx, box->y1 + src_dy,
+				     box->x1 + dst_dx, box->y1 + dst_dy,
+				     width, height,
+				     offset, pitch));
 
-		if (nbox) {
-			_kgem_submit(kgem);
-			_kgem_set_mode(kgem, KGEM_BLT);
-		}
+				assert(box->x1 + src_dx >= 0);
+				assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
+				assert(box->y1 + src_dy >= 0);
 
-		kgem_bo_destroy(kgem, src_bo);
-	} while (nbox);
+				assert(box->x1 + dst_dx >= 0);
+				assert(box->y1 + dst_dy >= 0);
+
+				memcpy_xor(src, (char *)ptr + offset,
+					   dst->drawable.bitsPerPixel,
+					   stride, pitch,
+					   box->x1 + src_dx, box->y1 + src_dy,
+					   0, 0,
+					   width, height,
+					   and, or);
+
+				assert(kgem->mode == KGEM_BLT);
+				b = kgem->batch + kgem->nbatch;
+				b[0] = cmd;
+				b[1] = br13;
+				b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
+				b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
+				*(uint64_t *)(b+4) =
+					kgem_add_reloc64(kgem, kgem->nbatch + 4, dst_bo,
+							 I915_GEM_DOMAIN_RENDER << 16 |
+							 I915_GEM_DOMAIN_RENDER |
+							 KGEM_RELOC_FENCED,
+							 0);
+				b[6] = 0;
+				b[7] = pitch;
+				*(uint64_t *)(b+8) =
+					kgem_add_reloc64(kgem, kgem->nbatch + 8, src_bo,
+							 I915_GEM_DOMAIN_RENDER << 16 |
+							 KGEM_RELOC_FENCED,
+							 offset);
+				kgem->nbatch += 10;
+
+				box++;
+				offset += pitch * height;
+			} while (--nbox_this_time);
+			assert(offset == __kgem_buffer_size(src_bo));
+			sigtrap_put();
+
+			if (nbox) {
+				_kgem_submit(kgem);
+				_kgem_set_mode(kgem, KGEM_BLT);
+			}
+
+			kgem_bo_destroy(kgem, src_bo);
+		} while (nbox);
+	} else {
+		cmd |= 6;
+		do {
+			int nbox_this_time;
+
+			nbox_this_time = nbox;
+			if (8*nbox_this_time > kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED)
+				nbox_this_time = (kgem->surface - kgem->nbatch - KGEM_BATCH_RESERVED) / 8;
+			if (2*nbox_this_time > KGEM_RELOC_SIZE(kgem) - kgem->nreloc)
+				nbox_this_time = (KGEM_RELOC_SIZE(kgem) - kgem->nreloc) / 2;
+			assert(nbox_this_time);
+			nbox -= nbox_this_time;
+
+			/* Count the total number of bytes to be read and allocate a
+			 * single buffer large enough. Or if it is very small, combine
+			 * with other allocations. */
+			offset = 0;
+			for (n = 0; n < nbox_this_time; n++) {
+				int height = box[n].y2 - box[n].y1;
+				int width = box[n].x2 - box[n].x1;
+				offset += PITCH(width, dst->drawable.bitsPerPixel >> 3) * height;
+			}
+
+			src_bo = kgem_create_buffer(kgem, offset,
+						    KGEM_BUFFER_WRITE_INPLACE | (nbox ? KGEM_BUFFER_LAST : 0),
+						    &ptr);
+			if (!src_bo)
+				goto fallback;
+
+			if (sigtrap_get()) {
+				kgem_bo_destroy(kgem, src_bo);
+				goto fallback;
+			}
+
+			offset = 0;
+			do {
+				int height = box->y2 - box->y1;
+				int width = box->x2 - box->x1;
+				int pitch = PITCH(width, dst->drawable.bitsPerPixel >> 3);
+				uint32_t *b;
+
+				DBG(("  %s: box src=(%d, %d), dst=(%d, %d) size=(%d, %d), dst offset=%d, dst pitch=%d\n",
+				     __FUNCTION__,
+				     box->x1 + src_dx, box->y1 + src_dy,
+				     box->x1 + dst_dx, box->y1 + dst_dy,
+				     width, height,
+				     offset, pitch));
+
+				assert(box->x1 + src_dx >= 0);
+				assert((box->x2 + src_dx)*dst->drawable.bitsPerPixel <= 8*stride);
+				assert(box->y1 + src_dy >= 0);
+
+				assert(box->x1 + dst_dx >= 0);
+				assert(box->y1 + dst_dy >= 0);
+
+				memcpy_xor(src, (char *)ptr + offset,
+					   dst->drawable.bitsPerPixel,
+					   stride, pitch,
+					   box->x1 + src_dx, box->y1 + src_dy,
+					   0, 0,
+					   width, height,
+					   and, or);
+
+				assert(kgem->mode == KGEM_BLT);
+				b = kgem->batch + kgem->nbatch;
+				b[0] = cmd;
+				b[1] = br13;
+				b[2] = (box->y1 + dst_dy) << 16 | (box->x1 + dst_dx);
+				b[3] = (box->y2 + dst_dy) << 16 | (box->x2 + dst_dx);
+				b[4] = kgem_add_reloc(kgem, kgem->nbatch + 4, dst_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      I915_GEM_DOMAIN_RENDER |
+						      KGEM_RELOC_FENCED,
+						      0);
+				b[5] = 0;
+				b[6] = pitch;
+				b[7] = kgem_add_reloc(kgem, kgem->nbatch + 7, src_bo,
+						      I915_GEM_DOMAIN_RENDER << 16 |
+						      KGEM_RELOC_FENCED,
+						      offset);
+				kgem->nbatch += 8;
+
+				box++;
+				offset += pitch * height;
+			} while (--nbox_this_time);
+			assert(offset == __kgem_buffer_size(src_bo));
+			sigtrap_put();
+
+			if (nbox) {
+				_kgem_submit(kgem);
+				_kgem_set_mode(kgem, KGEM_BLT);
+			}
+
+			kgem_bo_destroy(kgem, src_bo);
+		} while (nbox);
+	}
 
 	sna->blt_state.fill_bo = 0;
+	return true;
+
+fallback:
+	return write_boxes_inplace__xor(kgem,
+					src, stride, dst->drawable.bitsPerPixel, src_dx, src_dy,
+					dst_bo, dst_dx, dst_dy,
+					box, nbox,
+					and, or);
 }
 
 static bool
@@ -1383,10 +1730,10 @@ indirect_replace(struct sna *sna,
 
 	DBG(("%s: size=%d vs %d\n",
 	     __FUNCTION__,
-	     (int)pixmap->devKind * pixmap->drawable.height >> 12,
+	     stride * pixmap->drawable.height >> 12,
 	     kgem->half_cpu_cache_pages));
 
-	if ((int)pixmap->devKind * pixmap->drawable.height >> 12 > kgem->half_cpu_cache_pages)
+	if (stride * pixmap->drawable.height >> 12 > kgem->half_cpu_cache_pages)
 		return false;
 
 	if (!kgem_bo_can_blt(kgem, bo) &&
@@ -1402,55 +1749,58 @@ indirect_replace(struct sna *sna,
 	if (!src_bo)
 		return false;
 
-	memcpy_blt(src, ptr, pixmap->drawable.bitsPerPixel,
-		   stride, src_bo->pitch,
-		   0, 0,
-		   0, 0,
-		   pixmap->drawable.width,
-		   pixmap->drawable.height);
+	if (sigtrap_get() == 0) {
+		memcpy_blt(src, ptr, pixmap->drawable.bitsPerPixel,
+			   stride, src_bo->pitch,
+			   0, 0,
+			   0, 0,
+			   pixmap->drawable.width,
+			   pixmap->drawable.height);
 
-	box.x1 = box.y1 = 0;
-	box.x2 = pixmap->drawable.width;
-	box.y2 = pixmap->drawable.height;
+		box.x1 = box.y1 = 0;
+		box.x2 = pixmap->drawable.width;
+		box.y2 = pixmap->drawable.height;
 
-	ret = sna->render.copy_boxes(sna, GXcopy,
-				     pixmap, src_bo, 0, 0,
-				     pixmap, bo, 0, 0,
-				     &box, 1, 0);
+		ret = sna->render.copy_boxes(sna, GXcopy,
+					     pixmap, src_bo, 0, 0,
+					     pixmap, bo, 0, 0,
+					     &box, 1, 0);
+		sigtrap_put();
+	} else
+		ret = false;
 
 	kgem_bo_destroy(kgem, src_bo);
 
 	return ret;
 }
 
-bool sna_replace(struct sna *sna,
-		 PixmapPtr pixmap,
-		 struct kgem_bo **_bo,
+bool sna_replace(struct sna *sna, PixmapPtr pixmap,
 		 const void *src, int stride)
 {
-	struct kgem_bo *bo = *_bo;
-	struct kgem *kgem = &sna->kgem;
+	struct sna_pixmap *priv = sna_pixmap(pixmap);
+	struct kgem_bo *bo = priv->gpu_bo;
 	void *dst;
 
+	assert(bo);
 	DBG(("%s(handle=%d, %dx%d, bpp=%d, tiling=%d) busy?=%d\n",
 	     __FUNCTION__, bo->handle,
 	     pixmap->drawable.width,
 	     pixmap->drawable.height,
 	     pixmap->drawable.bitsPerPixel,
 	     bo->tiling,
-	     __kgem_bo_is_busy(kgem, bo)));
+	     __kgem_bo_is_busy(&sna->kgem, bo)));
 
-	assert(!sna_pixmap(pixmap)->pinned);
+	assert(!priv->pinned);
 
-	kgem_bo_undo(kgem, bo);
+	kgem_bo_undo(&sna->kgem, bo);
 
-	if (__kgem_bo_is_busy(kgem, bo)) {
+	if (__kgem_bo_is_busy(&sna->kgem, bo)) {
 		struct kgem_bo *new_bo;
 
 		if (indirect_replace(sna, pixmap, bo, src, stride))
 			return true;
 
-		new_bo = kgem_create_2d(kgem,
+		new_bo = kgem_create_2d(&sna->kgem,
 					pixmap->drawable.width,
 					pixmap->drawable.height,
 					pixmap->drawable.bitsPerPixel,
@@ -1461,33 +1811,40 @@ bool sna_replace(struct sna *sna,
 	}
 
 	if (bo->tiling == I915_TILING_NONE && bo->pitch == stride &&
-	    kgem_bo_write(kgem, bo, src,
+	    kgem_bo_write(&sna->kgem, bo, src,
 			  (pixmap->drawable.height-1)*stride + pixmap->drawable.width*pixmap->drawable.bitsPerPixel/8))
 			goto done;
 
-	if (upload_inplace__tiled(kgem, bo)) {
+	if (upload_inplace__tiled(&sna->kgem, bo)) {
 		BoxRec box;
 
 		box.x1 = box.y1 = 0;
 		box.x2 = pixmap->drawable.width;
 		box.y2 = pixmap->drawable.height;
 
-		if (write_boxes_inplace__tiled(kgem, src,
+		if (write_boxes_inplace__tiled(&sna->kgem, src,
 					       stride, pixmap->drawable.bitsPerPixel, 0, 0,
 					       bo, 0, 0, &box, 1))
 			goto done;
 	}
 
-	if (kgem_bo_is_mappable(kgem, bo) &&
-	    (dst = kgem_bo_map(kgem, bo)) != NULL) {
+	if (kgem_bo_can_map(&sna->kgem, bo) &&
+	    (dst = kgem_bo_map(&sna->kgem, bo)) != NULL &&
+	    sigtrap_get() == 0) {
 		memcpy_blt(src, dst, pixmap->drawable.bitsPerPixel,
 			   stride, bo->pitch,
 			   0, 0,
 			   0, 0,
 			   pixmap->drawable.width,
 			   pixmap->drawable.height);
+		sigtrap_put();
 	} else {
 		BoxRec box;
+
+		if (bo != priv->gpu_bo) {
+			kgem_bo_destroy(&sna->kgem, bo);
+			bo = priv->gpu_bo;
+		}
 
 		box.x1 = box.y1 = 0;
 		box.x2 = pixmap->drawable.width;
@@ -1497,28 +1854,26 @@ bool sna_replace(struct sna *sna,
 				     bo, 0, 0,
 				     src, stride, 0, 0,
 				     &box, 1))
-			goto err;
+			return false;
 	}
 
 done:
-	if (bo != *_bo)
-		kgem_bo_destroy(kgem, *_bo);
-	*_bo = bo;
-	return true;
+	if (bo != priv->gpu_bo) {
+		sna_pixmap_unmap(pixmap, priv);
+		kgem_bo_destroy(&sna->kgem, priv->gpu_bo);
+		priv->gpu_bo = bo;
+	}
 
-err:
-	if (bo != *_bo)
-		kgem_bo_destroy(kgem, bo);
-	return false;
+	return true;
 }
 
-struct kgem_bo *sna_replace__xor(struct sna *sna,
-				 PixmapPtr pixmap,
-				 struct kgem_bo *bo,
-				 const void *src, int stride,
-				 uint32_t and, uint32_t or)
+bool
+sna_replace__xor(struct sna *sna, PixmapPtr pixmap,
+		 const void *src, int stride,
+		 uint32_t and, uint32_t or)
 {
-	struct kgem *kgem = &sna->kgem;
+	struct sna_pixmap *priv = sna_pixmap(pixmap);
+	struct kgem_bo *bo = priv->gpu_bo;
 	void *dst;
 
 	DBG(("%s(handle=%d, %dx%d, bpp=%d, tiling=%d)\n",
@@ -1528,47 +1883,60 @@ struct kgem_bo *sna_replace__xor(struct sna *sna,
 	     pixmap->drawable.bitsPerPixel,
 	     bo->tiling));
 
-	assert(!sna_pixmap(pixmap)->pinned);
+	assert(!priv->pinned);
 
-	if (kgem_bo_is_busy(bo)) {
+	kgem_bo_undo(&sna->kgem, bo);
+
+	if (!kgem_bo_can_map(&sna->kgem, bo) ||
+	    __kgem_bo_is_busy(&sna->kgem, bo)) {
 		struct kgem_bo *new_bo;
 
-		new_bo = kgem_create_2d(kgem,
+		new_bo = kgem_create_2d(&sna->kgem,
 					pixmap->drawable.width,
 					pixmap->drawable.height,
 					pixmap->drawable.bitsPerPixel,
 					bo->tiling,
 					CREATE_GTT_MAP | CREATE_INACTIVE);
-		if (new_bo) {
-			kgem_bo_destroy(kgem, bo);
+		if (new_bo)
 			bo = new_bo;
-		}
 	}
 
-	if (kgem_bo_is_mappable(kgem, bo)) {
-		dst = kgem_bo_map(kgem, bo);
-		if (dst) {
-			memcpy_xor(src, dst, pixmap->drawable.bitsPerPixel,
-				   stride, bo->pitch,
-				   0, 0,
-				   0, 0,
-				   pixmap->drawable.width,
-				   pixmap->drawable.height,
-				   and, or);
-		}
+	if (kgem_bo_can_map(&sna->kgem, bo) &&
+	    (dst = kgem_bo_map(&sna->kgem, bo)) != NULL &&
+	    sigtrap_get() == 0) {
+		memcpy_xor(src, dst, pixmap->drawable.bitsPerPixel,
+			   stride, bo->pitch,
+			   0, 0,
+			   0, 0,
+			   pixmap->drawable.width,
+			   pixmap->drawable.height,
+			   and, or);
+		sigtrap_put();
 	} else {
 		BoxRec box;
+
+		if (bo != priv->gpu_bo) {
+			kgem_bo_destroy(&sna->kgem, bo);
+			bo = priv->gpu_bo;
+		}
 
 		box.x1 = box.y1 = 0;
 		box.x2 = pixmap->drawable.width;
 		box.y2 = pixmap->drawable.height;
 
-		sna_write_boxes__xor(sna, pixmap,
-				     bo, 0, 0,
-				     src, stride, 0, 0,
-				     &box, 1,
-				     and, or);
+		if (!sna_write_boxes__xor(sna, pixmap,
+					  bo, 0, 0,
+					  src, stride, 0, 0,
+					  &box, 1,
+					  and, or))
+			return false;
 	}
 
-	return bo;
+	if (bo != priv->gpu_bo) {
+		sna_pixmap_unmap(pixmap, priv);
+		kgem_bo_destroy(&sna->kgem, priv->gpu_bo);
+		priv->gpu_bo = bo;
+	}
+
+	return true;
 }

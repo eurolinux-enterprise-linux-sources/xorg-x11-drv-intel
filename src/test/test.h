@@ -31,7 +31,7 @@ struct test {
 		Window root;
 		XShmSegmentInfo shm;
 		int max_shm_size;
-		int width, height;
+		int width, height, depth;
 		XRenderPictFormat *format;
 	} real, ref;
 };
@@ -82,7 +82,7 @@ struct test_target {
 	GC gc;
 	XRenderPictFormat *format;
 	Picture picture;
-	int width, height;
+	int width, height, depth;
 	enum target target;
 };
 
@@ -119,5 +119,8 @@ double test_timer_stop(struct test_display *t, struct timespec *tv);
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof(a[0]))
 #endif
+
+#define REPS(I) (1 << (I))
+#define SETS(I) ((I) < 12 ? 1 << (12 - (I)) : 2)
 
 #endif

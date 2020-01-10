@@ -1,0 +1,95 @@
+diff -up xf86-video-intel-2.99.911/src/intel_module.c.jx xf86-video-intel-2.99.911/src/intel_module.c
+--- xf86-video-intel-2.99.911/src/intel_module.c.jx	2014-03-11 08:05:50.000000000 -0400
++++ xf86-video-intel-2.99.911/src/intel_module.c	2014-05-07 14:57:04.790360101 -0400
+@@ -447,11 +447,15 @@ _xf86findDriver(const char *ident, XF86C
+ 	return NULL;
+ }
+ 
+-static enum accel_method { SNA, UXA, GLAMOR } get_accel_method(void)
++static enum accel_method { SNA, UXA, GLAMOR } get_accel_method(int gen)
+ {
+ 	enum accel_method accel_method = DEFAULT_ACCEL_METHOD;
+ 	XF86ConfDevicePtr dev;
+ 
++	/* RHEL6: keep UXA default below Broadwell */
++	if (gen < 0100)
++	    accel_method = UXA;
++
+ 	if (hosted())
+ 		return SNA;
+ 
+@@ -481,6 +485,7 @@ intel_scrn_create(DriverPtr		driver,
+ 		  unsigned		flags)
+ {
+ 	ScrnInfoPtr scrn;
++	int gen;
+ 
+ 	if (match_data == 0) {
+ 		int devid = intel_entity_get_devid(entity_num), i;
+@@ -497,6 +502,7 @@ intel_scrn_create(DriverPtr		driver,
+ 		if (match_data == 0)
+ 			return FALSE;
+ 	}
++	gen = ((struct intel_device_info *)match_data)->gen;
+ 
+ 	scrn = xf86AllocateScreen(driver, flags);
+ 	if (scrn == NULL)
+@@ -513,12 +519,12 @@ intel_scrn_create(DriverPtr		driver,
+ 	xf86AddEntityToScreen(scrn, entity_num);
+ 
+ #if UMS
+-	if ((unsigned)((struct intel_device_info *)match_data)->gen < 020)
++	if (gen < 020)
+ 		return lg_i810_init(scrn);
+ #endif
+ 
+ #if KMS
+-	switch (get_accel_method()) {
++	switch (get_accel_method(gen)) {
+ #if USE_SNA
+ 	case SNA: return sna_init_scrn(scrn, entity_num);
+ #endif
+diff -up xf86-video-intel-2.99.911/src/sna/sna_accel.c.jx xf86-video-intel-2.99.911/src/sna/sna_accel.c
+--- xf86-video-intel-2.99.911/src/sna/sna_accel.c.jx	2014-03-19 10:32:58.000000000 -0400
++++ xf86-video-intel-2.99.911/src/sna/sna_accel.c	2014-08-27 10:55:51.296139338 -0400
+@@ -16986,7 +16986,8 @@ static bool sna_option_accel_none(struct
+ {
+ 	const char *s;
+ 
+-	if (xf86ReturnOptValBool(sna->Options, OPTION_ACCEL_DISABLE, FALSE))
++	if (xf86ReturnOptValBool(sna->Options, OPTION_ACCEL_DISABLE,
++				 sna->info->gen == 0100))
+ 		return true;
+ 
+ 	s = xf86GetOptValString(sna->Options, OPTION_ACCEL_METHOD);
+diff -up xf86-video-intel-2.99.911/src/sna/sna_driver.c.jx xf86-video-intel-2.99.911/src/sna/sna_driver.c
+--- xf86-video-intel-2.99.911/src/sna/sna_driver.c.jx	2014-03-18 11:55:13.000000000 -0400
++++ xf86-video-intel-2.99.911/src/sna/sna_driver.c	2014-08-27 10:55:14.749004159 -0400
+@@ -548,7 +548,8 @@ static Bool sna_pre_init(ScrnInfoPtr scr
+ 	kgem_init(&sna->kgem, fd,
+ 		  xf86GetPciInfoForEntity(pEnt->index),
+ 		  sna->info->gen);
+-	if (xf86ReturnOptValBool(sna->Options, OPTION_ACCEL_DISABLE, FALSE) ||
++	if (xf86ReturnOptValBool(sna->Options, OPTION_ACCEL_DISABLE,
++				 sna->info->gen == 0100) ||
+ 	    !sna_option_cast_to_bool(sna, OPTION_ACCEL_METHOD, TRUE)) {
+ 		xf86DrvMsg(sna->scrn->scrnIndex, X_CONFIG,
+ 			   "Disabling hardware acceleration.\n");
+diff -up xf86-video-intel-2.99.911/src/uxa/intel_driver.c.jx xf86-video-intel-2.99.911/src/uxa/intel_driver.c
+--- xf86-video-intel-2.99.911/src/uxa/intel_driver.c.jx	2014-08-27 10:41:16.000000000 -0400
++++ xf86-video-intel-2.99.911/src/uxa/intel_driver.c	2014-08-27 10:50:53.940043892 -0400
+@@ -349,10 +349,13 @@ static Bool has_prime_vmap_flush(struct
+ 
+ static Bool can_accelerate_blt(struct intel_screen_private *intel)
+ {
++	Bool accel_default = (INTEL_INFO(intel)->gen == 0100);
++
+ 	if (INTEL_INFO(intel)->gen == -1)
+ 		return FALSE;
+ 
+-	if (xf86ReturnOptValBool(intel->Options, OPTION_ACCEL_DISABLE, FALSE) ||
++	if (xf86ReturnOptValBool(intel->Options, OPTION_ACCEL_DISABLE,
++				 accel_default) ||
+ 	    !intel_option_cast_string_to_bool(intel, OPTION_ACCEL_METHOD, TRUE)) {
+ 		xf86DrvMsg(intel->scrn->scrnIndex, X_CONFIG,
+ 			   "Disabling hardware acceleration.\n");

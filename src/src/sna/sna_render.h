@@ -113,6 +113,7 @@ struct sna_composite_op {
 			uint32_t inplace :1;
 			uint32_t overwrites:1;
 			uint32_t bpp : 6;
+			uint32_t alu : 4;
 
 			uint32_t cmd;
 			uint32_t br13;
@@ -143,6 +144,10 @@ struct sna_composite_op {
 		struct {
 			uint32_t flags;
 		} gen7;
+
+		struct {
+			uint32_t flags;
+		} gen8;
 	} u;
 
 	void *priv;
@@ -151,7 +156,7 @@ struct sna_composite_op {
 struct sna_opacity_box {
 	BoxRec box;
 	float alpha;
-} __packed__;
+} tightly_packed;
 
 struct sna_composite_spans_op {
 	struct sna_composite_op base;
@@ -194,6 +199,11 @@ struct sna_fill_op {
 			       const struct sna_fill_op *op,
 			       const BoxRec *box,
 			       int count);
+	fastcall void (*points)(struct sna *sna,
+			       const struct sna_fill_op *op,
+			       int16_t dx, int16_t dy,
+			       const DDXPointRec *points,
+			       int count);
 	void (*done)(struct sna *sna, const struct sna_fill_op *op);
 };
 
@@ -226,7 +236,10 @@ struct sna_render {
 			  int16_t msk_x, int16_t msk_y,
 			  int16_t dst_x, int16_t dst_y,
 			  int16_t w, int16_t h,
+			  unsigned flags,
 			  struct sna_composite_op *tmp);
+#define COMPOSITE_PARTIAL 0x1
+#define COMPOSITE_FALLBACK 0x80000000
 
 	bool (*check_composite_spans)(struct sna *sna, uint8_t op,
 				      PicturePtr dst, PicturePtr src,
@@ -255,8 +268,11 @@ struct sna_render {
 			   const BoxRec *box, int n);
 	bool (*fill)(struct sna *sna, uint8_t alu,
 		     PixmapPtr dst, struct kgem_bo *dst_bo,
-		     uint32_t color,
+		     uint32_t color, unsigned flags,
 		     struct sna_fill_op *tmp);
+#define FILL_BOXES 0x1
+#define FILL_POINTS 0x2
+#define FILL_SPANS 0x4
 	bool (*fill_one)(struct sna *sna, PixmapPtr dst, struct kgem_bo *dst_bo,
 			 uint32_t color,
 			 int16_t x1, int16_t y1, int16_t x2, int16_t y2,
@@ -287,7 +303,7 @@ struct sna_render {
 	struct sna_solid_cache {
 		struct kgem_bo *cache_bo;
 		struct kgem_bo *bo[1024];
-		uint32_t color[1025];
+		uint32_t color[1024];
 		int last;
 		int size;
 		int dirty;
@@ -391,10 +407,10 @@ struct gen5_render_state {
 	int ve_id;
 	uint32_t drawrect_offset;
 	uint32_t drawrect_limit;
+	uint32_t last_pipelined_pointers;
 	uint16_t last_primitive;
 	int16_t floats_per_vertex;
 	uint16_t surface_table;
-	uint16_t last_pipelined_pointers;
 
 	bool needs_invariant;
 };
@@ -421,6 +437,7 @@ enum {
 };
 
 struct gen6_render_state {
+	unsigned gt;
 	const struct gt_info *info;
 	struct kgem_bo *general_bo;
 
@@ -470,6 +487,7 @@ enum {
 };
 
 struct gen7_render_state {
+	unsigned gt;
 	const struct gt_info *info;
 	struct kgem_bo *general_bo;
 
@@ -478,6 +496,57 @@ struct gen7_render_state {
 	uint32_t sf_mask_state;
 	uint32_t wm_state;
 	uint32_t wm_kernel[GEN7_WM_KERNEL_COUNT][3];
+
+	uint32_t cc_blend;
+
+	uint32_t drawrect_offset;
+	uint32_t drawrect_limit;
+	uint32_t blend;
+	uint32_t samplers;
+	uint32_t kernel;
+
+	uint16_t num_sf_outputs;
+	uint16_t ve_id;
+	uint16_t last_primitive;
+	int16_t floats_per_vertex;
+	uint16_t surface_table;
+
+	bool needs_invariant;
+	bool emit_flush;
+};
+
+
+enum {
+	GEN8_WM_KERNEL_NOMASK = 0,
+	GEN8_WM_KERNEL_NOMASK_P,
+
+	GEN8_WM_KERNEL_MASK,
+	GEN8_WM_KERNEL_MASK_P,
+
+	GEN8_WM_KERNEL_MASKCA,
+	GEN8_WM_KERNEL_MASKCA_P,
+
+	GEN8_WM_KERNEL_MASKSA,
+	GEN8_WM_KERNEL_MASKSA_P,
+
+	GEN8_WM_KERNEL_OPACITY,
+	GEN8_WM_KERNEL_OPACITY_P,
+
+	GEN8_WM_KERNEL_VIDEO_PLANAR,
+	GEN8_WM_KERNEL_VIDEO_PACKED,
+	GEN8_WM_KERNEL_COUNT
+};
+
+struct gen8_render_state {
+	unsigned gt;
+
+	struct kgem_bo *general_bo;
+
+	uint32_t vs_state;
+	uint32_t sf_state;
+	uint32_t sf_mask_state;
+	uint32_t wm_state;
+	uint32_t wm_kernel[GEN8_WM_KERNEL_COUNT][3];
 
 	uint32_t cc_blend;
 
@@ -551,6 +620,7 @@ const char *gen4_render_init(struct sna *sna, const char *backend);
 const char *gen5_render_init(struct sna *sna, const char *backend);
 const char *gen6_render_init(struct sna *sna, const char *backend);
 const char *gen7_render_init(struct sna *sna, const char *backend);
+const char *gen8_render_init(struct sna *sna, const char *backend);
 
 bool sna_tiling_composite(uint32_t op,
 			  PicturePtr src,
@@ -586,6 +656,12 @@ bool sna_tiling_blt_copy_boxes(struct sna *sna, uint8_t alu,
 			       struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 			       int bpp, const BoxRec *box, int nbox);
 
+bool sna_tiling_blt_composite(struct sna *sna,
+			      struct sna_composite_op *op,
+			      struct kgem_bo *bo,
+			      int bpp,
+			      uint32_t alpha_fixup);
+
 bool sna_blt_composite(struct sna *sna,
 		       uint32_t op,
 		       PicturePtr src,
@@ -593,8 +669,8 @@ bool sna_blt_composite(struct sna *sna,
 		       int16_t src_x, int16_t src_y,
 		       int16_t dst_x, int16_t dst_y,
 		       int16_t width, int16_t height,
-		       struct sna_composite_op *tmp,
-		       bool fallback);
+		       unsigned flags,
+		       struct sna_composite_op *tmp);
 bool sna_blt_composite__convert(struct sna *sna,
 				int x, int y,
 				int width, int height,
@@ -623,6 +699,11 @@ bool sna_blt_copy_boxes(struct sna *sna, uint8_t alu,
 			struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
 			int bpp,
 			const BoxRec *box, int n);
+bool sna_blt_copy_boxes__with_alpha(struct sna *sna, uint8_t alu,
+				    struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
+				    struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
+				    int bpp, int alpha_fixup,
+				    const BoxRec *box, int nbox);
 bool sna_blt_copy_boxes_fallback(struct sna *sna, uint8_t alu,
 				 PixmapPtr src, struct kgem_bo *src_bo, int16_t src_dx, int16_t src_dy,
 				 PixmapPtr dst, struct kgem_bo *dst_bo, int16_t dst_dx, int16_t dst_dy,
@@ -774,5 +855,12 @@ static inline bool sna_vertex_wait__locked(struct sna_render *r)
 		pthread_cond_wait(&r->wait, &r->lock);
 	return was_active;
 }
+
+#define alphaless(format) PICT_FORMAT(PICT_FORMAT_BPP(format),		\
+				      PICT_FORMAT_TYPE(format),		\
+				      0,				\
+				      PICT_FORMAT_R(format),		\
+				      PICT_FORMAT_G(format),		\
+				      PICT_FORMAT_B(format))
 
 #endif /* SNA_RENDER_H */

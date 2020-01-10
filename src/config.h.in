@@ -1,7 +1,5 @@
 /* config.h.in.  Generated from configure.ac by autoheader.  */
 
-#include "xorg-server.h"
-
 /* Builder description */
 #undef BUILDER_DESCRIPTION
 
@@ -17,7 +15,7 @@
 /* Default acceleration method */
 #undef DEFAULT_ACCEL_METHOD
 
-/* Default DRI driver path */
+/* Default DRI2 driver path */
 #undef DRI_DRIVER_PATH
 
 /* Enable XvMC support */
@@ -44,8 +42,11 @@
 /* Are we in a git checkout? */
 #undef HAVE_DOT_GIT
 
-/* Enable DRI driver support */
+/* Enable DRI1 driver support */
 #undef HAVE_DRI1
+
+/* Enable DRI2 driver support */
+#undef HAVE_DRI2
 
 /* Define to 1 if you have the <dri2.h> header file. */
 #undef HAVE_DRI2_H
@@ -80,6 +81,9 @@
 /* Define to 1 if you have the <string.h> header file. */
 #undef HAVE_STRING_H
 
+/* Define to 1 if `totalram' is a member of `struct sysinfo'. */
+#undef HAVE_STRUCT_SYSINFO_TOTALRAM
+
 /* Define to 1 if you have the <sys/stat.h> header file. */
 #undef HAVE_SYS_STAT_H
 
@@ -98,11 +102,32 @@
 /* Use valgrind intrinsics to suppress false warnings */
 #undef HAVE_VALGRIND
 
+/* Define to 1 if you have the <vgaHW.h> header file. */
+#undef HAVE_VGAHW_H
+
+/* Define to 1 if you have the <X11/extensions/dpmsconst.h> header file. */
+#undef HAVE_X11_EXTENSIONS_DPMSCONST_H
+
+/* Define to 1 if you have the <X11/extensions/shmproto.h> header file. */
+#undef HAVE_X11_EXTENSIONS_SHMPROTO_H
+
+/* Define to 1 if you have the <X11/extensions/shmstr.h> header file. */
+#undef HAVE_X11_EXTENSIONS_SHMSTR_H
+
+/* Define to 1 if you have the <X11/extensions/XShm.h> header file. */
+#undef HAVE_X11_EXTENSIONS_XSHM_H
+
 /* Define to 1 if you have the <xaa.h> header file. */
 #undef HAVE_XAA_H
 
+/* Define to 1 if shared memory segments are released deferred. */
+#undef IPC_RMID_DEFERRED_RELEASE
+
 /* Assume KMS support */
-#undef KMS_ONLY
+#undef KMS
+
+/* libexec directory */
+#undef LIBEXEC_PATH
 
 /* Define to the sub-directory in which libtool stores uninstalled libraries.
    */
@@ -141,14 +166,20 @@
 /* Patch version of this package */
 #undef PACKAGE_VERSION_PATCHLEVEL
 
+/* installation prefix */
+#undef PREFIX_PATH
+
 /* Define to 1 if you have the ANSI C header files. */
 #undef STDC_HEADERS
 
-/* Assume only UMS (no KMS) support */
-#undef UMS_ONLY
+/* Assume UMS support */
+#undef UMS
 
 /* Assume asynchronous swap support */
 #undef USE_ASYNC_SWAP
+
+/* Enable use of the backlight helper interfaces */
+#undef USE_BACKLIGHT_HELPER
 
 /* Assume "create2" support */
 #undef USE_CREATE2
@@ -158,6 +189,12 @@
 
 /* Enable glamor acceleration */
 #undef USE_GLAMOR
+
+/* Assume "rendernode" support */
+#undef USE_RENDERNODE
+
+/* Assume "rotation" support */
+#undef USE_ROTATION
 
 /* Enable SNA support */
 #undef USE_SNA
@@ -170,11 +207,6 @@
 
 /* Version number of package */
 #undef VERSION
-
-/* Enable large inode numbers on Mac OS X 10.5.  */
-#ifndef _DARWIN_USE_64_BIT_INODE
-# define _DARWIN_USE_64_BIT_INODE 1
-#endif
 
 /* Number of bits in a file offset, on hosts where this is settable. */
 #undef _FILE_OFFSET_BITS

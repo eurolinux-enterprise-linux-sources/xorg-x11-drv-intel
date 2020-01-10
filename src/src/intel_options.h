@@ -1,6 +1,7 @@
 #ifndef INTEL_OPTIONS_H
 #define INTEL_OPTIONS_H
 
+#include <xorg-server.h>
 #include <xf86.h>
 #include <xf86Opt.h>
 
@@ -19,6 +20,8 @@ enum intel_options {
 	OPTION_COLOR_KEY,
 	OPTION_TILING_2D,
 	OPTION_TILING_FB,
+	OPTION_VSYNC,
+	OPTION_PAGEFLIP,
 	OPTION_SWAPBUFFERS_WAIT,
 	OPTION_TRIPLE_BUFFER,
 	OPTION_PREFER_OVERLAY,
@@ -30,6 +33,7 @@ enum intel_options {
 #endif
 #ifdef USE_SNA
 	OPTION_ZAPHOD,
+	OPTION_VIRTUAL,
 	OPTION_TEAR_FREE,
 	OPTION_CRTC_PIXMAPS,
 #endif

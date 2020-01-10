@@ -150,12 +150,20 @@ static inline void FreePixmap(PixmapPtr pixmap)
 }
 #endif
 
+#if !HAS_DIXREGISTERPRIVATEKEY
+#define dixPrivateKeyRegistered(key__) (*(key__) != 0)
+#endif
+
 #if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,9,99,902,0)
 #define SourceValidate(d, x, y, w, h, mode) \
 	if ((d)->pScreen->SourceValidate) (d)->pScreen->SourceValidate(d, x, y, w, h, mode)
 #else
 #define SourceValidate(d, x, y, w, h, mode) \
 	if ((d)->pScreen->SourceValidate) (d)->pScreen->SourceValidate(d, x, y, w, h)
+#endif
+
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,14,99,2,0)
+#define DamageUnregister(d, dd) DamageUnregister(dd)
 #endif
 
 #endif

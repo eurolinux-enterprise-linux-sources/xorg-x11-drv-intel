@@ -43,9 +43,9 @@ static XvFormatRec Formats[] = {
 };
 
 static const XvAttributeRec Attributes[] = {
-	{XvSettable | XvGettable, -1, 1, "XV_SYNC_TO_VBLANK"},
-	//{XvSettable | XvGettable, -128, 127, "XV_BRIGHTNESS"},
-	//{XvSettable | XvGettable, 0, 255, "XV_CONTRAST"},
+	{XvSettable | XvGettable, -1, 1, (char *)"XV_SYNC_TO_VBLANK"},
+	//{XvSettable | XvGettable, -128, 127, (char *)"XV_BRIGHTNESS"},
+	//{XvSettable | XvGettable, 0, 255, (char *)"XV_CONTRAST"},
 };
 
 static const XvImageRec Images[] = {
@@ -193,7 +193,7 @@ sna_video_textured_put_image(ClientPtr client,
 	     format->id, width, height, sync));
 
 	DBG(("%s: region %ld:(%d, %d), (%d, %d)\n", __FUNCTION__,
-	     RegionNumRects(&clip),
+	     (long)RegionNumRects(&clip),
 	     clip.extents.x1, clip.extents.y1,
 	     clip.extents.x2, clip.extents.y2));
 
@@ -205,8 +205,7 @@ sna_video_textured_put_image(ClientPtr client,
 
 	sna_video_frame_init(video, format->id, width, height, &frame);
 
-	if (!sna_video_clip_helper(sna->scrn, video, &frame,
-				   &crtc, &dstBox,
+	if (!sna_video_clip_helper(video, &frame, &crtc, &dstBox,
 				   src_x, src_y, drw_x + draw->x, drw_y + draw->y,
 				   src_w, src_h, drw_w, drw_h,
 				   &clip))
@@ -222,7 +221,13 @@ sna_video_textured_put_image(ClientPtr client,
 			return BadAlloc;
 		}
 
-		assert(kgem_bo_size(frame.bo) >= frame.size);
+		if (kgem_bo_size(frame.bo) < frame.size) {
+			DBG(("%s: bo size=%d, expected=%d\n",
+			     __FUNCTION__, kgem_bo_size(frame.bo), frame.size));
+			kgem_bo_destroy(&sna->kgem, frame.bo);
+			return BadAlloc;
+		}
+
 		frame.image.x1 = 0;
 		frame.image.y1 = 0;
 		frame.image.x2 = frame.width;
@@ -361,12 +366,12 @@ void sna_video_textured_setup(struct sna *sna, ScreenPtr screen)
 
 	adaptor->type = XvInputMask | XvImageMask;
 	adaptor->pScreen = screen;
-	adaptor->name = "Intel(R) Textured Video";
+	adaptor->name = (char *)"Intel(R) Textured Video";
 	adaptor->nEncodings = 1;
 	adaptor->pEncodings = xnfalloc(sizeof(XvEncodingRec));
 	adaptor->pEncodings[0].id = 0;
 	adaptor->pEncodings[0].pScreen = screen;
-	adaptor->pEncodings[0].name = "XV_IMAGE";
+	adaptor->pEncodings[0].name = (char *)"XV_IMAGE";
 	adaptor->pEncodings[0].width = sna->render.max_3d_size;
 	adaptor->pEncodings[0].height = sna->render.max_3d_size;
 	adaptor->pEncodings[0].rate.numerator = 1;
@@ -375,9 +380,9 @@ void sna_video_textured_setup(struct sna *sna, ScreenPtr screen)
 	adaptor->nFormats = sna_xv_fixup_formats(screen, Formats,
 						 ARRAY_SIZE(Formats));
 	adaptor->nAttributes = ARRAY_SIZE(Attributes);
-	adaptor->pAttributes = Attributes;
+	adaptor->pAttributes = (XvAttributeRec *)Attributes;
 	adaptor->nImages = ARRAY_SIZE(Images);
-	adaptor->pImages = Images;
+	adaptor->pImages = (XvImageRec *)Images;
 	adaptor->ddAllocatePort = sna_xv_alloc_port;
 	adaptor->ddFreePort = sna_xv_free_port;
 	adaptor->ddPutVideo = NULL;

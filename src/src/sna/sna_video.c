@@ -60,7 +60,6 @@
 #include "intel_options.h"
 
 #include <xf86xv.h>
-#include <X11/extensions/Xv.h>
 
 #ifdef SNA_XVMC
 #define _SNA_XVMC_SERVER_
@@ -96,6 +95,13 @@ sna_video_buffer(struct sna_video *video,
 	if (video->buf && __kgem_bo_size(video->buf) < frame->size)
 		sna_video_free_buffers(video);
 
+	if (video->buf && video->buf->scanout) {
+		if (frame->width != video->width ||
+		    frame->height != video->height ||
+		    frame->id != video->format)
+			sna_video_free_buffers(video);
+	}
+
 	if (video->buf == NULL) {
 		if (video->tiled) {
 			video->buf = kgem_create_2d(&video->sna->kgem,
@@ -106,6 +112,10 @@ sna_video_buffer(struct sna_video *video,
 							CREATE_GTT_MAP);
 		}
 	}
+
+	video->width  = frame->width;
+	video->height = frame->height;
+	video->format = frame->id;
 
 	return video->buf;
 }
@@ -121,10 +131,9 @@ void sna_video_buffer_fini(struct sna_video *video)
 }
 
 bool
-sna_video_clip_helper(ScrnInfoPtr scrn,
-		      struct sna_video *video,
+sna_video_clip_helper(struct sna_video *video,
 		      struct sna_video_frame *frame,
-		      xf86CrtcPtr * crtc_ret,
+		      xf86CrtcPtr *crtc_ret,
 		      BoxPtr dst,
 		      short src_x, short src_y,
 		      short drw_x, short drw_y,
@@ -152,7 +161,7 @@ sna_video_clip_helper(ScrnInfoPtr scrn,
 	 * For overlay video, compute the relevant CRTC and
 	 * clip video to that
 	 */
-	crtc = sna_covering_crtc(scrn, dst, video->desired_crtc);
+	crtc = sna_covering_crtc(video->sna, dst, video->desired_crtc);
 
 	/* For textured video, we don't actually want to clip at all. */
 	if (crtc && !video->textured) {
@@ -225,25 +234,52 @@ sna_video_frame_init(struct sna_video *video,
 			frame->size = height;
 		}
 		frame->size *= frame->pitch[0] + frame->pitch[1];
-	} else {
+
 		if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
-			frame->pitch[0] = ALIGN((height << 1), align);
-			frame->size = (int)frame->pitch[0] * width;
+			frame->UBufOffset = (int)frame->pitch[1] * width;
+			frame->VBufOffset =
+				frame->UBufOffset + (int)frame->pitch[0] * width / 2;
 		} else {
-			frame->pitch[0] = ALIGN((width << 1), align);
-			frame->size = (int)frame->pitch[0] * height;
+			frame->UBufOffset = (int)frame->pitch[1] * height;
+			frame->VBufOffset =
+				frame->UBufOffset + (int)frame->pitch[0] * height / 2;
+		}
+	} else {
+		switch (frame->id) {
+		case FOURCC_RGB888:
+			if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
+				frame->pitch[0] = ALIGN((height << 2), align);
+				frame->size = (int)frame->pitch[0] * width;
+			} else {
+				frame->pitch[0] = ALIGN((width << 2), align);
+				frame->size = (int)frame->pitch[0] * height;
+			}
+			frame->UBufOffset = frame->VBufOffset = 0;
+			break;
+		case FOURCC_RGB565:
+			if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
+				frame->pitch[0] = ALIGN((height << 1), align);
+				frame->size = (int)frame->pitch[0] * width;
+			} else {
+				frame->pitch[0] = ALIGN((width << 1), align);
+				frame->size = (int)frame->pitch[0] * height;
+			}
+			frame->UBufOffset = frame->VBufOffset = 0;
+			break;
+
+		default:
+			if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
+				frame->pitch[0] = ALIGN((height << 1), align);
+				frame->size = (int)frame->pitch[0] * width;
+			} else {
+				frame->pitch[0] = ALIGN((width << 1), align);
+				frame->size = (int)frame->pitch[0] * height;
+			}
+			break;
 		}
 		frame->pitch[1] = 0;
-	}
-
-	if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
-		frame->UBufOffset = (int)frame->pitch[1] * width;
-		frame->VBufOffset =
-			frame->UBufOffset + (int)frame->pitch[0] * width / 2;
-	} else {
-		frame->UBufOffset = (int)frame->pitch[1] * height;
-		frame->VBufOffset =
-			frame->UBufOffset + (int)frame->pitch[0] * height / 2;
+		frame->UBufOffset = 0;
+		frame->VBufOffset = 0;
 	}
 
 	assert(frame->size);
@@ -484,11 +520,25 @@ sna_video_copy_data(struct sna_video *video,
 				return true;
 			}
 		} else {
-			if (frame->width*2 == frame->pitch[0]) {
+			int x, y, w, h;
+
+			if (video->textured) {
+				/* XXX support copying cropped extents */
+				x = y = 0;
+				w = frame->width;
+				h = frame->height;
+			} else {
+				x = frame->image.x1;
+				y = frame->image.y1;
+				w = frame->image.x2 - frame->image.x1;
+				h = frame->image.y2 - frame->image.y1;
+			}
+
+			if (w*2 == frame->pitch[0]) {
+				buf += (2U*y * frame->width) + (x << 1);
 				if (frame->bo) {
 					kgem_bo_write(&video->sna->kgem, frame->bo,
-						      buf + (2U*frame->image.y1 * frame->width) + (frame->image.x1 << 1),
-						      2U*(frame->image.y2-frame->image.y1)*frame->width);
+						      buf, 2U*h*frame->width);
 				} else {
 					frame->bo = kgem_create_buffer(&video->sna->kgem, frame->size,
 								       KGEM_BUFFER_WRITE | KGEM_BUFFER_WRITE_INPLACE,
@@ -496,9 +546,7 @@ sna_video_copy_data(struct sna_video *video,
 					if (frame->bo == NULL)
 						return false;
 
-					memcpy(dst,
-					       buf + (frame->image.y1 * frame->width*2) + (frame->image.x1 << 1),
-					       2U*(frame->image.y2-frame->image.y1)*frame->width);
+					memcpy(dst, buf, 2U*h*frame->width);
 				}
 				return true;
 			}

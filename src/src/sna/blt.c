@@ -138,7 +138,7 @@ xmm_save_128(__m128i *dst, __m128i data)
 }
 #endif
 
-fast_memcpy void
+fast void
 memcpy_blt(const void *src, void *dst, int bpp,
 	   int32_t src_stride, int32_t dst_stride,
 	   int16_t src_x, int16_t src_y,
@@ -198,6 +198,14 @@ memcpy_blt(const void *src, void *dst, int bpp,
 	case 8:
 		do {
 			*(uint64_t *)dst_bytes = *(const uint64_t *)src_bytes;
+			src_bytes += src_stride;
+			dst_bytes += dst_stride;
+		} while (--height);
+		break;
+	case 16:
+		do {
+			((uint64_t *)dst_bytes)[0] = ((const uint64_t *)src_bytes)[0];
+			((uint64_t *)dst_bytes)[1] = ((const uint64_t *)src_bytes)[1];
 			src_bytes += src_stride;
 			dst_bytes += dst_stride;
 		} while (--height);
@@ -940,7 +948,7 @@ memcpy_xor(const void *src, void *dst, int bpp,
 {
 	const uint8_t *src_bytes;
 	uint8_t *dst_bytes;
-	int i;
+	int i, w;
 
 	assert(width && height);
 	assert(bpp >= 8);
@@ -992,19 +1000,20 @@ memcpy_xor(const void *src, void *dst, int bpp,
 				or |= or << 16;
 			}
 		case 4:
-#if USE_SSE2
-			if (width * 4 == dst_stride && dst_stride == src_stride) {
-				width *= height;
+			w = width;
+			if (w * 4 == dst_stride && dst_stride == src_stride) {
+				w *= height;
 				height = 1;
 			}
 
+#if USE_SSE2
 			if (have_sse2()) {
 				do {
 					uint32_t *d = (uint32_t *)dst_bytes;
 					const uint32_t *s = (const uint32_t *)src_bytes;
 					__m128i mask = xmm_create_mask_32(or);
 
-					i = width;
+					i = w;
 					while (i && (uintptr_t)d & 15) {
 						*d++ = *s++ | or;
 						i--;
@@ -1071,7 +1080,7 @@ memcpy_xor(const void *src, void *dst, int bpp,
 					uint32_t *d = (uint32_t *)dst_bytes;
 					uint32_t *s = (uint32_t *)src_bytes;
 
-					for (i = 0; i < width; i++)
+					for (i = 0; i < w; i++)
 						d[i] = s[i] | or;
 
 					src_bytes += src_stride;

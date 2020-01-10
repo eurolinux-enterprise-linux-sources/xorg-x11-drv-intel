@@ -24,6 +24,12 @@
 
  **************************************************************************/
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <sys/types.h>
+#include <sys/stat.h>
 #include <assert.h>
 #include <string.h>
 #include <unistd.h>
@@ -34,22 +40,56 @@
 #include <sys/ioctl.h>
 
 #include <pciaccess.h>
+
+#include <xorg-server.h>
 #include <xf86.h>
 #include <xf86drm.h>
 #include <xf86drmMode.h>
 #include <xf86_OSproc.h>
 #include <i915_drm.h>
 
+#ifdef XSERVER_PLATFORM_BUS
+#include <xf86platformBus.h>
+#endif
+
 #include "intel_driver.h"
+#include "fd.h"
 
 struct intel_device {
-	char *path;
+	char *master_node;
+	char *render_node;
 	int fd;
 	int open_count;
 	int master_count;
 };
 
 static int intel_device_key = -1;
+
+static int __intel_get_device_id(int fd)
+{
+	struct drm_i915_getparam gp;
+	int devid = 0;
+
+	memset(&gp, 0, sizeof(gp));
+	gp.param = I915_PARAM_CHIPSET_ID;
+	gp.value = &devid;
+
+	if (ioctl(fd, DRM_IOCTL_I915_GETPARAM, &gp, sizeof(gp)))
+		return 0;
+
+	return devid;
+}
+
+int intel_entity_get_devid(int idx)
+{
+	struct intel_device *dev;
+
+	dev = xf86GetEntityPrivate(idx, intel_device_key)->ptr;
+	if (dev == NULL)
+		return 0;
+
+	return __intel_get_device_id(dev->fd);
+}
 
 static inline struct intel_device *intel_device(ScrnInfoPtr scrn)
 {
@@ -92,7 +132,7 @@ static int __intel_check_device(int fd)
 		if (drmIoctl(fd, DRM_IOCTL_I915_GETPARAM, &gp))
 			ret = FALSE;
 	}
-	if (ret) {
+	if (ret && !hosted()) {
 		struct drm_mode_card_res res;
 
 		memset(&res, 0, sizeof(res));
@@ -103,24 +143,6 @@ static int __intel_check_device(int fd)
 	return ret;
 }
 
-static int fd_set_cloexec(int fd)
-{
-	int flags;
-
-	if (fd == -1)
-		return fd;
-
-#ifdef FD_CLOEXEC
-	flags = fcntl(fd, F_GETFD);
-	if (flags != -1) {
-		flags |= FD_CLOEXEC;
-		fcntl(fd, F_SETFD, flags);
-	}
-#endif
-
-	return fd;
-}
-
 static int __intel_open_device(const struct pci_device *pci, char **path)
 {
 	int fd;
@@ -128,6 +150,9 @@ static int __intel_open_device(const struct pci_device *pci, char **path)
 	if (*path == NULL) {
 		char id[20];
 		int ret;
+
+		if (pci == NULL)
+			return -1;
 
 		snprintf(id, sizeof(id),
 			 "pci:%04x:%02x:%02x.%d",
@@ -151,26 +176,115 @@ static int __intel_open_device(const struct pci_device *pci, char **path)
 				fd = -1;
 			}
 		}
+		fd = fd_set_nonblock(fd);
 	} else {
 #ifdef O_CLOEXEC
-		fd = open(*path, O_RDWR | O_CLOEXEC);
+		fd = open(*path, O_RDWR | O_NONBLOCK | O_CLOEXEC);
 #else
 		fd = -1;
 #endif
 		if (fd == -1)
-			fd = fd_set_cloexec(open(*path, O_RDWR));
+			fd = fd_set_cloexec(open(*path, O_RDWR | O_NONBLOCK));
 	}
 
 	return fd;
 }
 
+static char *find_master_node(int fd)
+{
+	struct stat st, master;
+	char buf[128];
+
+	if (fstat(fd, &st))
+		return NULL;
+
+	if (!S_ISCHR(st.st_mode))
+		return NULL;
+
+	sprintf(buf, "/dev/dri/card%d", (int)(st.st_rdev & 0x7f));
+	if (stat(buf, &master) == 0 &&
+	    st.st_mode == master.st_mode &&
+	    (st.st_rdev & 0x7f) == master.st_rdev)
+		return strdup(buf);
+
+	/* Fallback to iterating over the usual suspects */
+	return drmGetDeviceNameFromFd(fd);
+}
+
+static char *find_render_node(int fd)
+{
+#if defined(USE_RENDERNODE)
+	struct stat master, render;
+	char buf[128];
+
+	if (fstat(fd, &master))
+		return NULL;
+
+	if (!S_ISCHR(master.st_mode))
+		return NULL;
+
+	/* Are we a render-node ourselves? */
+	if (master.st_rdev & 0x80)
+		return NULL;
+
+	sprintf(buf, "/dev/dri/renderD%d", (int)((master.st_rdev | 0x80) & 0xbf));
+	if (stat(buf, &render) == 0 &&
+	    master.st_mode == render.st_mode &&
+	    render.st_rdev == ((master.st_rdev | 0x80) & 0xbf))
+		return strdup(buf);
+#endif
+
+	return NULL;
+}
+
+#if defined(ODEV_ATTRIB_PATH)
+static char *get_path(struct xf86_platform_device *dev)
+{
+	const char *path;
+
+	if (dev == NULL)
+		return NULL;
+
+	path = xf86_get_platform_device_attrib(dev, ODEV_ATTRIB_PATH);
+	if (path == NULL)
+		return NULL;
+
+	return strdup(path);
+}
+
+#else
+
+static char *get_path(struct xf86_platform_device *dev)
+{
+	return NULL;
+}
+#endif
+
+
+#if defined(ODEV_ATTRIB_FD)
+static int get_fd(struct xf86_platform_device *dev)
+{
+	if (dev == NULL)
+		return -1;
+
+	return xf86_get_platform_device_int_attrib(dev, ODEV_ATTRIB_FD, -1);
+}
+
+#else
+
+static int get_fd(struct xf86_platform_device *dev)
+{
+	return -1;
+}
+#endif
+
 int intel_open_device(int entity_num,
 		      const struct pci_device *pci,
-		      const char *path)
+		      struct xf86_platform_device *platform)
 {
 	struct intel_device *dev;
 	char *local_path;
-	int fd;
+	int fd, master_count;
 
 	if (intel_device_key == -1)
 		intel_device_key = xf86AllocateEntityPrivateIndex();
@@ -181,11 +295,23 @@ int intel_open_device(int entity_num,
 	if (dev)
 		return dev->fd;
 
-	local_path = path ? strdup(path) : NULL;
+	local_path = get_path(platform);
 
-	fd = __intel_open_device(pci, &local_path);
-	if (fd == -1)
-		goto err_path;
+	master_count = 1; /* DRM_MASTER is managed by Xserver */
+	fd = get_fd(platform);
+	if (fd == -1) {
+		fd = __intel_open_device(pci, &local_path);
+		if (fd == -1)
+			goto err_path;
+
+		master_count = 0;
+	}
+
+	if (local_path == NULL) {
+		local_path = find_master_node(fd);
+		if (local_path == NULL)
+			goto err_close;
+	}
 
 	if (!__intel_check_device(fd))
 		goto err_close;
@@ -194,17 +320,27 @@ int intel_open_device(int entity_num,
 	if (dev == NULL)
 		goto err_close;
 
-	dev->path = local_path;
 	dev->fd = fd;
 	dev->open_count = 0;
-	dev->master_count = 0;
+	dev->master_count = master_count;
+	dev->master_node = local_path;
+	dev->render_node = find_render_node(fd);
+	if (dev->render_node == NULL)
+		dev->render_node = dev->master_node;
+
+	/* If hosted under a system compositor, just pretend to be master */
+	if (hosted()) {
+		dev->open_count++;
+		dev->master_count++;
+	}
 
 	xf86GetEntityPrivate(entity_num, intel_device_key)->ptr = dev;
 
 	return fd;
 
 err_close:
-	close(fd);
+	if (master_count == 0) /* Don't close server-fds */
+		close(fd);
 err_path:
 	free(local_path);
 	return -1;
@@ -221,6 +357,8 @@ int intel_get_device(ScrnInfoPtr scrn)
 	if (dev->open_count++ == 0) {
 		drmSetVersion sv;
 		int retry = 2000;
+
+		assert(!hosted());
 
 		/* Check that what we opened was a master or a
 		 * master-capable FD, by setting the version of the
@@ -249,11 +387,18 @@ int intel_get_device(ScrnInfoPtr scrn)
 	return dev->fd;
 }
 
-const char *intel_get_device_name(ScrnInfoPtr scrn)
+const char *intel_get_client_name(ScrnInfoPtr scrn)
 {
 	struct intel_device *dev = intel_device(scrn);
-	assert(dev && dev->path);
-	return dev->path;
+	assert(dev && dev->render_node);
+	return dev->render_node;
+}
+
+int intel_get_device_id(ScrnInfoPtr scrn)
+{
+	struct intel_device *dev = intel_device(scrn);
+	assert(dev && dev->fd != -1);
+	return __intel_get_device_id(dev->fd);
 }
 
 int intel_get_master(ScrnInfoPtr scrn)
@@ -267,6 +412,7 @@ int intel_get_master(ScrnInfoPtr scrn)
 	if (dev->master_count++ == 0) {
 		int retry = 2000;
 
+		assert(!hosted());
 		do {
 			ret = drmSetMaster(dev->fd);
 			if (ret == 0)
@@ -288,23 +434,12 @@ int intel_put_master(ScrnInfoPtr scrn)
 	ret = 0;
 	assert(dev->master_count);
 	if (--dev->master_count == 0) {
+		assert(!hosted());
 		assert(drmSetMaster(dev->fd) == 0);
 		ret = drmDropMaster(dev->fd);
 	}
 
 	return ret;
-}
-
-void __intel_uxa_release_device(ScrnInfoPtr scrn)
-{
-	struct intel_device *dev = intel_device(scrn);
-	if (dev && dev->open_count == 0) {
-		intel_set_device(scrn, NULL);
-
-		drmClose(dev->fd);
-		free(dev->path);
-		free(dev);
-	}
 }
 
 void intel_put_device(ScrnInfoPtr scrn)
@@ -317,9 +452,12 @@ void intel_put_device(ScrnInfoPtr scrn)
 	if (--dev->open_count)
 		return;
 
+	assert(!hosted());
 	intel_set_device(scrn, NULL);
 
 	drmClose(dev->fd);
-	free(dev->path);
+	if (dev->render_node != dev->master_node)
+		free(dev->render_node);
+	free(dev->master_node);
 	free(dev);
 }

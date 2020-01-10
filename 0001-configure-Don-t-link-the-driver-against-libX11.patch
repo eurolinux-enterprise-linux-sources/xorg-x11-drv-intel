@@ -1,0 +1,32 @@
+From cc29309243dae878c6a169696fefaf1e7ad830b9 Mon Sep 17 00:00:00 2001
+From: Adam Jackson <ajax@redhat.com>
+Date: Tue, 3 Jun 2014 10:22:57 -0400
+Subject: [PATCH] configure: Don't link the driver against libX11
+
+78dc0c04745ad4485b994f67833f4a155749f01d added REQUIRED_MODULES to the
+driver link line for... some reason.  That pulled in the libs from the
+XF86DRI check, which near as I can tell has always been wrong, all of
+the other extension checks just look for the protocol module and
+xextproto doesn't define dri1 protocol in any case.
+
+Signed-off-by: Adam Jackson <ajax@redhat.com>
+---
+ configure.ac | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/configure.ac b/configure.ac
+index 353f942..30bed3e 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -330,7 +330,7 @@ fi
+ # Store the list of server defined optional extensions in REQUIRED_MODULES
+ XORG_DRIVER_CHECK_EXT(RANDR, randrproto)
+ XORG_DRIVER_CHECK_EXT(RENDER, renderproto)
+-XORG_DRIVER_CHECK_EXT(XF86DRI, xextproto x11)
++XORG_DRIVER_CHECK_EXT(XF86DRI, xf86driproto)
+ XORG_DRIVER_CHECK_EXT(DPMSExtension, xextproto)
+ 
+ # Obtain compiler/linker options for the driver dependencies
+-- 
+1.9.0
+
