@@ -58,7 +58,6 @@ SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #include "xf86cmap.h"
 
 #include "compiler.h"
-#include "mibstore.h"
 #include "vgaHW.h"
 #include "mipointer.h"
 #include "micmap.h"
@@ -152,7 +151,7 @@ static int i810_pitches[] = {
 static Bool
 I810GetRec(ScrnInfoPtr scrn)
 {
-   if (scrn->driverPrivate)
+   if (((uintptr_t)scrn->driverPrivate & 1) == 0)
       return TRUE;
 
    scrn->driverPrivate = xnfcalloc(sizeof(I810Rec), 1);
@@ -1675,7 +1674,6 @@ I810ScreenInit(SCREEN_INIT_ARGS_DECL)
       I810EmitFlush(scrn);
    }
 
-   miInitializeBackingStore(screen);
    xf86SetBackingStore(screen);
    xf86SetSilkenMouse(screen);
 

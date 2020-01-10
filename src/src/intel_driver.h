@@ -192,6 +192,75 @@
 #define PCI_CHIP_IVYBRIDGE_S_GT1	0x015a
 #define PCI_CHIP_IVYBRIDGE_S_GT2	0x016a
 
+#define PCI_CHIP_HASWELL_D_GT1		0x0402
+#define PCI_CHIP_HASWELL_D_GT2		0x0412
+#define PCI_CHIP_HASWELL_D_GT3		0x0422
+#define PCI_CHIP_HASWELL_M_GT1		0x0406
+#define PCI_CHIP_HASWELL_M_GT2		0x0416
+#define PCI_CHIP_HASWELL_M_GT3		0x0426
+#define PCI_CHIP_HASWELL_S_GT1		0x040A
+#define PCI_CHIP_HASWELL_S_GT2		0x041A
+#define PCI_CHIP_HASWELL_S_GT3		0x042A
+#define PCI_CHIP_HASWELL_B_GT1		0x040B
+#define PCI_CHIP_HASWELL_B_GT2		0x041B
+#define PCI_CHIP_HASWELL_B_GT3		0x042B
+#define PCI_CHIP_HASWELL_E_GT1		0x040E
+#define PCI_CHIP_HASWELL_E_GT2		0x041E
+#define PCI_CHIP_HASWELL_E_GT3		0x042E
+
+#define PCI_CHIP_HASWELL_SDV_D_GT1	0x0C02
+#define PCI_CHIP_HASWELL_SDV_D_GT2	0x0C12
+#define PCI_CHIP_HASWELL_SDV_D_GT3	0x0C22
+#define PCI_CHIP_HASWELL_SDV_M_GT1	0x0C06
+#define PCI_CHIP_HASWELL_SDV_M_GT2	0x0C16
+#define PCI_CHIP_HASWELL_SDV_M_GT3	0x0C26
+#define PCI_CHIP_HASWELL_SDV_S_GT1	0x0C0A
+#define PCI_CHIP_HASWELL_SDV_S_GT2	0x0C1A
+#define PCI_CHIP_HASWELL_SDV_S_GT3	0x0C2A
+#define PCI_CHIP_HASWELL_SDV_B_GT1	0x0C0E
+#define PCI_CHIP_HASWELL_SDV_B_GT2	0x0C1E
+#define PCI_CHIP_HASWELL_SDV_B_GT3	0x0C2E
+#define PCI_CHIP_HASWELL_SDV_E_GT1	0x0C0E
+#define PCI_CHIP_HASWELL_SDV_E_GT2	0x0C1E
+#define PCI_CHIP_HASWELL_SDV_E_GT3	0x0C2E
+
+#define PCI_CHIP_HASWELL_ULT_D_GT1	0x0A02
+#define PCI_CHIP_HASWELL_ULT_D_GT2	0x0A12
+#define PCI_CHIP_HASWELL_ULT_D_GT3	0x0A22
+#define PCI_CHIP_HASWELL_ULT_M_GT1	0x0A06
+#define PCI_CHIP_HASWELL_ULT_M_GT2	0x0A16
+#define PCI_CHIP_HASWELL_ULT_M_GT3	0x0A26
+#define PCI_CHIP_HASWELL_ULT_S_GT1	0x0A0A
+#define PCI_CHIP_HASWELL_ULT_S_GT2	0x0A1A
+#define PCI_CHIP_HASWELL_ULT_S_GT3	0x0A2A
+#define PCI_CHIP_HASWELL_ULT_B_GT1	0x0A0B
+#define PCI_CHIP_HASWELL_ULT_B_GT2	0x0A1B
+#define PCI_CHIP_HASWELL_ULT_B_GT3	0x0A2B
+#define PCI_CHIP_HASWELL_ULT_E_GT1	0x0A0E
+#define PCI_CHIP_HASWELL_ULT_E_GT2	0x0A1E
+#define PCI_CHIP_HASWELL_ULT_E_GT3	0x0A2E
+
+#define PCI_CHIP_HASWELL_CRW_D_GT1	0x0D02
+#define PCI_CHIP_HASWELL_CRW_D_GT2	0x0D12
+#define PCI_CHIP_HASWELL_CRW_D_GT3	0x0D22
+#define PCI_CHIP_HASWELL_CRW_M_GT1	0x0D06
+#define PCI_CHIP_HASWELL_CRW_M_GT2	0x0D16
+#define PCI_CHIP_HASWELL_CRW_M_GT3	0x0D26
+#define PCI_CHIP_HASWELL_CRW_S_GT1	0x0D0A
+#define PCI_CHIP_HASWELL_CRW_S_GT2	0x0D1A
+#define PCI_CHIP_HASWELL_CRW_S_GT3	0x0D2A
+#define PCI_CHIP_HASWELL_CRW_B_GT1	0x0D0B
+#define PCI_CHIP_HASWELL_CRW_B_GT2	0x0D1B
+#define PCI_CHIP_HASWELL_CRW_B_GT3	0x0D2B
+#define PCI_CHIP_HASWELL_CRW_E_GT1	0x0D0E
+#define PCI_CHIP_HASWELL_CRW_E_GT2	0x0D1E
+#define PCI_CHIP_HASWELL_CRW_E_GT3	0x0D2E
+
+#define PCI_CHIP_VALLEYVIEW_PO		0x0f30
+#define PCI_CHIP_VALLEYVIEW_1		0x0f31
+#define PCI_CHIP_VALLEYVIEW_2		0x0f32
+#define PCI_CHIP_VALLEYVIEW_3		0x0f33
+
 #endif
 
 #define I85X_CAPID			0x44
@@ -210,7 +279,7 @@
 #define CHIP_REVISION(p)  (p)->revision
 
 #define INTEL_INFO(intel) ((intel)->info)
-#define IS_GENx(intel, X) (INTEL_INFO(intel)->gen >= 10*(X) && INTEL_INFO(intel)->gen < 10*((X)+1))
+#define IS_GENx(intel, X) (INTEL_INFO(intel)->gen >= 8*(X) && INTEL_INFO(intel)->gen < 8*((X)+1))
 #define IS_GEN1(intel) IS_GENx(intel, 1)
 #define IS_GEN2(intel) IS_GENx(intel, 2)
 #define IS_GEN3(intel) IS_GENx(intel, 3)
@@ -218,6 +287,7 @@
 #define IS_GEN5(intel) IS_GENx(intel, 5)
 #define IS_GEN6(intel) IS_GENx(intel, 6)
 #define IS_GEN7(intel) IS_GENx(intel, 7)
+#define IS_HSW(intel) (INTEL_INFO(intel)->gen == 075)
 
 /* Some chips have specific errata (or limits) that we need to workaround. */
 #define IS_I830(intel) (DEVICE_ID((intel)->PciInfo) == PCI_CHIP_I830_M)
@@ -230,17 +300,24 @@
 #define IS_965_Q(pI810) (DEVICE_ID(pI810->PciInfo) == PCI_CHIP_I965_Q)
 
 /* supports Y tiled surfaces (pre-965 Mesa isn't ready yet) */
-#define SUPPORTS_YTILING(pI810) (INTEL_INFO(intel)->gen >= 40)
-#define HAS_BLT(pI810) (INTEL_INFO(intel)->gen >= 60)
+#define SUPPORTS_YTILING(pI810) (INTEL_INFO(intel)->gen >= 040)
+#define HAS_BLT(pI810) (INTEL_INFO(intel)->gen >= 060)
 
-extern SymTabRec *intel_chipsets;
 struct intel_device_info {
 	int gen;
 };
 
-const struct intel_device_info *
-intel_detect_chipset(ScrnInfoPtr scrn,
-		     EntityInfoPtr ent, struct pci_device *pci);
+void intel_detect_chipset(ScrnInfoPtr scrn,
+			  EntityInfoPtr ent,
+			  struct pci_device *pci);
 
+int intel_open_device(int entity_num, const struct pci_device *pci, const char *path);
+int intel_get_device(ScrnInfoPtr scrn);
+const char *intel_get_device_name(ScrnInfoPtr scrn);
+int intel_get_master(ScrnInfoPtr scrn);
+int intel_put_master(ScrnInfoPtr scrn);
+void intel_put_device(ScrnInfoPtr scrn);
+
+void __intel_uxa_release_device(ScrnInfoPtr scrn);
 
 #endif /* INTEL_DRIVER_H */

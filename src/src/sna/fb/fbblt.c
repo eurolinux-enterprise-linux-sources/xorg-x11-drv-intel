@@ -270,8 +270,8 @@ fbBlt(FbBits *srcLine, FbStride srcStride, int srcX,
       int alu, FbBits pm, int bpp,
       Bool reverse, Bool upsidedown)
 {
-	DBG(("%s %dx%d, alu=%d, pm=%d, bpp=%d\n",
-	     __FUNCTION__, width, height, alu, pm, bpp));
+	DBG(("%s %dx%d, alu=%d, pm=%x, bpp=%d (reverse=%d, upsidedown=%d)\n",
+	     __FUNCTION__, width, height, alu, pm, bpp, reverse, upsidedown));
 
 	if (alu == GXcopy && pm == FB_ALLONES && ((srcX|dstX|width) & 7) == 0) {
 		CARD8 *s = (CARD8 *) srcLine;
@@ -285,21 +285,20 @@ fbBlt(FbBits *srcLine, FbStride srcStride, int srcX,
 		s += srcX >> 3;
 		d += dstX >> 3;
 
-		DBG(("%s fast blt, src_stride=%d, dst_stride=%d, width=%d (offset=%d)\n",
+		DBG(("%s fast blt, src_stride=%d, dst_stride=%d, width=%d (offset=%ld)\n",
 		     __FUNCTION__,
-		     srcStride, dstStride, width,
-		     srcLine - dstLine));
+		     srcStride, dstStride, width, (long)(s - d)));
 
-		if ((srcLine < dstLine && srcLine + width > dstLine) ||
-		    (dstLine < srcLine && dstLine + width > srcLine))
+		if (width == srcStride && width == dstStride) {
+			width *= height;
+			height = 1;
+		}
+
+		if ((s < d && s + width > d) || (d < s && d + width > s))
 			func = memmove;
 		else
 			func = memcpy;
 		if (!upsidedown) {
-			if (srcStride == dstStride && srcStride == width) {
-				width *= height;
-				height = 1;
-			}
 			for (i = 0; i < height; i++)
 				func(d + i * dstStride,
 				     s + i * srcStride,

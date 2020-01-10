@@ -1,6 +1,6 @@
 %define moduledir %(pkg-config xorg-server --variable=moduledir )
 %define driverdir	%{moduledir}/drivers
-%define gputoolsdate 20110817
+%define gputoolsdate 20130625
 #define gitdate 20120718
 #define gitrev .%{gitdate}
 
@@ -13,7 +13,7 @@
 
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
-Version:   2.20.2
+Version:   2.21.12
 Release:   2%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
@@ -30,6 +30,8 @@ Source4:    make-git-snapshot.sh
 
 Patch23: redhat-intel-crtc-dpms.patch
 
+Patch100: igt-old-cairo.patch
+
 ExclusiveArch: %{ix86} x86_64 ia64
 
 BuildRequires: autoconf automake libtool
@@ -40,6 +42,8 @@ BuildRequires: libdrm-devel >= 2.4.37
 BuildRequires: libudev-devel
 BuildRequires: libxcb-devel >= 1.5 
 BuildRequires: xcb-util-devel
+BuildRequires: cairo-devel
+BuildRequires: glib2-devel
 
 Requires:  kernel >= 2.6.32-33.el6
 Requires:  libdrm >= 2.4.37
@@ -76,6 +80,9 @@ Debugging tools for Intel graphics chips
 %prep
 %setup -q -n xf86-video-intel-%{?gitdate:%{gitdate}}%{!?gitdate:%{dirsuffix}} -b3
 %patch23 -p1 -b .lid-hack
+pushd ../intel-gpu-tools-%{gputoolsdate}
+%patch100 -p1 -b .cairo
+popd
 
 %build
  
@@ -93,7 +100,7 @@ make
 
 pushd ../intel-gpu-tools-%{gputoolsdate}
 autoreconf -v --install
-%configure
+%configure --disable-nouveau --disable-dumper
 make
 popd
 
@@ -107,6 +114,7 @@ make install DESTDIR=$RPM_BUILD_ROOT
 popd
 
 find $RPM_BUILD_ROOT -regex ".*\.la$" | xargs rm -f --
+find $RPM_BUILD_ROOT -name '*asm*' | xargs rm -f --
 
 %clean
 rm -rf $RPM_BUILD_ROOT
@@ -127,11 +135,23 @@ rm -rf $RPM_BUILD_ROOT
 %files -n intel-gpu-tools
 %defattr(-,root,root,-)
 %doc COPYING
-%{_bindir}/forcewaked
 %{_bindir}/intel_*
 %{_mandir}/man1/intel_*.1*
 
 %changelog
+* Tue Sep 10 2013 Adam Jackson <ajax@redhat.com> 2.21.12-2
+- Don't package gen4asm stuff
+
+* Tue Jul 23 2013 Adam Jackson <ajax@redhat.com> 2.21.12-1
+- intel 2.21.12
+
+* Tue Jun 25 2013 Adam Jackson <ajax@redhat.com> 2.21.10-1
+- intel 2.21.10
+- new i-g-t snapshot
+
+* Fri Sep 21 2012 Adam Jackson <ajax@redhat.com> 2.20.8-1
+- intel 2.20.8
+
 * Wed Aug 22 2012 airlied@redhat.com - 2.20.2-2
 - rebuild for server ABI requires
 

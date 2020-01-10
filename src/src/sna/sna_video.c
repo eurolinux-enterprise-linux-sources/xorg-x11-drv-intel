@@ -66,54 +66,51 @@
 #define _SNA_XVMC_SERVER_
 #include "sna_video_hwmc.h"
 #else
-static inline bool sna_video_xvmc_setup(struct sna *sna,
-					ScreenPtr ptr,
-					XF86VideoAdaptorPtr target)
+static inline void sna_video_xvmc_setup(struct sna *sna, ScreenPtr ptr)
 {
-	return false;
 }
 #endif
 
-void sna_video_free_buffers(struct sna *sna, struct sna_video *video)
+void sna_video_free_buffers(struct sna_video *video)
 {
 	unsigned int i;
 
 	for (i = 0; i < ARRAY_SIZE(video->old_buf); i++) {
 		if (video->old_buf[i]) {
-			if (video->old_buf[i]->unique_id)
-				drmModeRmFB(sna->kgem.fd,
-						video->old_buf[i]->unique_id);
-			kgem_bo_destroy(&sna->kgem, video->old_buf[i]);
+			kgem_bo_destroy(&video->sna->kgem, video->old_buf[i]);
 			video->old_buf[i] = NULL;
 		}
 	}
 
 	if (video->buf) {
-		if (video->buf->unique_id)
-			drmModeRmFB(sna->kgem.fd, video->buf->unique_id);
-		kgem_bo_destroy(&sna->kgem, video->buf);
+		kgem_bo_destroy(&video->sna->kgem, video->buf);
 		video->buf = NULL;
 	}
 }
 
 struct kgem_bo *
-sna_video_buffer(struct sna *sna,
-		 struct sna_video *video,
+sna_video_buffer(struct sna_video *video,
 		 struct sna_video_frame *frame)
 {
 	/* Free the current buffer if we're going to have to reallocate */
 	if (video->buf && __kgem_bo_size(video->buf) < frame->size)
-		sna_video_free_buffers(sna, video);
+		sna_video_free_buffers(video);
 
-	if (video->buf == NULL)
-		video->buf = kgem_create_linear(&sna->kgem, frame->size,
-						CREATE_GTT_MAP);
+	if (video->buf == NULL) {
+		if (video->tiled) {
+			video->buf = kgem_create_2d(&video->sna->kgem,
+						    frame->width, frame->height, 32,
+						    I915_TILING_X, CREATE_EXACT);
+		} else {
+			video->buf = kgem_create_linear(&video->sna->kgem, frame->size,
+							CREATE_GTT_MAP);
+		}
+	}
 
 	return video->buf;
 }
 
-void sna_video_buffer_fini(struct sna *sna,
-			   struct sna_video *video)
+void sna_video_buffer_fini(struct sna_video *video)
 {
 	struct kgem_bo *bo;
 
@@ -171,136 +168,145 @@ sna_video_clip_helper(ScrnInfoPtr scrn,
 	if (crtc_region != reg)
 		RegionUninit(crtc_region);
 
-	frame->top = y1 >> 16;
-	frame->left = (x1 >> 16) & ~1;
-	frame->npixels = ALIGN(((x2 + 0xffff) >> 16), 2) - frame->left;
+	frame->src.x1 = x1 >> 16;
+	frame->src.y1 = y1 >> 16;
+	frame->src.x2 = (x2 + 0xffff) >> 16;
+	frame->src.y2 = (y2 + 0xffff) >> 16;
+
+	frame->image.x1 = frame->src.x1 & ~1;
+	frame->image.x2 = ALIGN(frame->src.x2, 2);
 	if (is_planar_fourcc(frame->id)) {
-		frame->top &= ~1;
-		frame->nlines = ALIGN(((y2 + 0xffff) >> 16), 2) - frame->top;
-	} else
-		frame->nlines = ((y2 + 0xffff) >> 16) - frame->top;
+		frame->image.y1 = frame->src.y1 & ~1;
+		frame->image.y2 = ALIGN(frame->src.y2, 2);
+	} else {
+		frame->image.y1 = frame->src.y1;
+		frame->image.y2 = frame->src.y2;
+	}
 
 	return ret;
 }
 
 void
-sna_video_frame_init(struct sna *sna,
-		     struct sna_video *video,
+sna_video_frame_init(struct sna_video *video,
 		     int id, short width, short height,
 		     struct sna_video_frame *frame)
 {
 	int align;
+
+	DBG(("%s: id=%d [planar? %d], width=%d, height=%d, align=%d\n",
+	     __FUNCTION__, id, is_planar_fourcc(id), width, height, video->alignment));
+	assert(width && height);
 
 	frame->bo = NULL;
 	frame->id = id;
 	frame->width = width;
 	frame->height = height;
 
-	/* Only needs to be DWORD-aligned for textured on i915, but overlay has
-	 * stricter requirements.
-	 */
-	if (video->textured) {
-		align = 4;
-	} else {
-		if (sna->kgem.gen >= 40)
-			/* Actually the alignment is 64 bytes, too. But the
-			 * stride must be at least 512 bytes. Take the easy fix
-			 * and align on 512 bytes unconditionally. */
-			align = 512;
-		else if (sna->kgem.gen < 21)
-			/* Harsh, errata on these chipsets limit the stride
-			 * to be a multiple of 256 bytes.
-			 */
-			align = 256;
-		else
-			align = 64;
-	}
-
+	align = video->alignment;
 #if SNA_XVMC
 	/* for i915 xvmc, hw requires 1kb aligned surfaces */
-	if (id == FOURCC_XVMC && sna->kgem.gen < 40)
+	if (id == FOURCC_XVMC && video->sna->kgem.gen < 040 && align < 1024)
 		align = 1024;
 #endif
 
-
-	/* Determine the desired destination pitch (representing the chroma's pitch,
-	 * in the planar case.
+	/* Determine the desired destination pitch (representing the
+	 * chroma's pitch in the planar case).
 	 */
 	if (is_planar_fourcc(id)) {
+		assert((width & 1) == 0);
+		assert((height & 1) == 0);
 		if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
 			frame->pitch[0] = ALIGN((height / 2), align);
 			frame->pitch[1] = ALIGN(height, align);
-			frame->size = frame->pitch[0] * width * 3;
+			frame->size = width;
 		} else {
 			frame->pitch[0] = ALIGN((width / 2), align);
 			frame->pitch[1] = ALIGN(width, align);
-			frame->size = frame->pitch[0] * height * 3;
+			frame->size = height;
 		}
+		frame->size *= frame->pitch[0] + frame->pitch[1];
 	} else {
 		if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
 			frame->pitch[0] = ALIGN((height << 1), align);
-			frame->size = frame->pitch[0] * width;
+			frame->size = (int)frame->pitch[0] * width;
 		} else {
 			frame->pitch[0] = ALIGN((width << 1), align);
-			frame->size = frame->pitch[0] * height;
+			frame->size = (int)frame->pitch[0] * height;
 		}
 		frame->pitch[1] = 0;
 	}
 
 	if (video->rotation & (RR_Rotate_90 | RR_Rotate_270)) {
-		frame->UBufOffset = frame->pitch[1] * width;
+		frame->UBufOffset = (int)frame->pitch[1] * width;
 		frame->VBufOffset =
-			frame->UBufOffset + frame->pitch[0] * width / 2;
+			frame->UBufOffset + (int)frame->pitch[0] * width / 2;
 	} else {
-		frame->UBufOffset = frame->pitch[1] * height;
+		frame->UBufOffset = (int)frame->pitch[1] * height;
 		frame->VBufOffset =
-			frame->UBufOffset + frame->pitch[0] * height / 2;
+			frame->UBufOffset + (int)frame->pitch[0] * height / 2;
 	}
+
+	assert(frame->size);
 }
 
-static void sna_memcpy_plane(uint8_t *dst, const uint8_t *src,
-			     int height, int width,
-			     int dstPitch, int srcPitch,
-			     Rotation rotation)
+static void sna_memcpy_plane(struct sna_video *video,
+			     uint8_t *dst, const uint8_t *src,
+			     const struct sna_video_frame *frame, int sub)
 {
+	int dstPitch = frame->pitch[!sub], srcPitch;
 	const uint8_t *s;
 	int i, j = 0;
+	int x, y, w, h;
 
-	switch (rotation) {
+	x = frame->image.x1;
+	y = frame->image.y1;
+	w = frame->image.x2 - frame->image.x1;
+	h = frame->image.y2 - frame->image.y1;
+	if (sub) {
+		x >>= 1; w >>= 1;
+		y >>= 1; h >>= 1;
+		srcPitch = ALIGN((frame->width >> 1), 4);
+	} else
+		srcPitch = ALIGN(frame->width, 4);
+
+	src += y * srcPitch + x;
+	if (!video->textured)
+		x = y = 0;
+
+	switch (video->rotation) {
 	case RR_Rotate_0:
-		/* optimise for the case of no clipping */
-		if (srcPitch == dstPitch && srcPitch == width)
-			memcpy(dst, src, srcPitch * height);
-		else while (height--) {
-			memcpy(dst, src, width);
+		dst += y * dstPitch + x;
+		if (srcPitch == dstPitch && srcPitch == w)
+			memcpy(dst, src, srcPitch * h);
+		else while (h--) {
+			memcpy(dst, src, w);
 			src += srcPitch;
 			dst += dstPitch;
 		}
 		break;
 	case RR_Rotate_90:
-		for (i = 0; i < height; i++) {
+		for (i = 0; i < h; i++) {
 			s = src;
-			for (j = 0; j < width; j++) {
-				dst[(i) + ((width - j - 1) * dstPitch)] = *s++;
-			}
+			for (j = 0; j < w; j++)
+				dst[i + ((x + w - j - 1) * dstPitch)] = *s++;
 			src += srcPitch;
 		}
 		break;
 	case RR_Rotate_180:
-		for (i = 0; i < height; i++) {
+		for (i = 0; i < h; i++) {
 			s = src;
-			for (j = 0; j < width; j++) {
-				dst[(width - j - 1) +
-				    ((height - i - 1) * dstPitch)] = *s++;
+			for (j = 0; j < w; j++) {
+				dst[(x + w - j - 1) +
+				    ((h - i - 1) * dstPitch)] = *s++;
 			}
 			src += srcPitch;
 		}
 		break;
 	case RR_Rotate_270:
-		for (i = 0; i < height; i++) {
+		for (i = 0; i < h; i++) {
 			s = src;
-			for (j = 0; j < width; j++) {
-				dst[(height - i - 1) + (j * dstPitch)] = *s++;
+			for (j = 0; j < w; j++) {
+				dst[(h - i - 1) + (x + j * dstPitch)] = *s++;
 			}
 			src += srcPitch;
 		}
@@ -314,36 +320,22 @@ sna_copy_planar_data(struct sna_video *video,
 		     const uint8_t *src, uint8_t *dst)
 {
 	uint8_t *d;
-	int w = frame->npixels;
-	int h = frame->nlines;
-	int pitch;
 
-	pitch = ALIGN(frame->width, 4);
-	sna_memcpy_plane(dst, src + frame->top * pitch + frame->left,
-			 h, w, frame->pitch[1], pitch, video->rotation);
-
-	src += frame->height * pitch; /* move over Luma plane */
-
-	/* align to beginning of chroma planes */
-	pitch = ALIGN((frame->width >> 1), 0x4);
-	src += (frame->top >> 1) * pitch + (frame->left >> 1);
-	w >>= 1;
-	h >>= 1;
+	sna_memcpy_plane(video, dst, src, frame, 0);
+	src += frame->height * ALIGN(frame->width, 4);
 
 	if (frame->id == FOURCC_I420)
 		d = dst + frame->UBufOffset;
 	else
 		d = dst + frame->VBufOffset;
-
-	sna_memcpy_plane(d, src, h, w, frame->pitch[0], pitch, video->rotation);
-	src += (frame->height >> 1) * pitch; /* move over Chroma plane */
+	sna_memcpy_plane(video, d, src, frame, 1);
+	src += (frame->height >> 1) * ALIGN(frame->width >> 1, 4);
 
 	if (frame->id == FOURCC_I420)
 		d = dst + frame->VBufOffset;
 	else
 		d = dst + frame->UBufOffset;
-
-	sna_memcpy_plane(d, src, h, w, frame->pitch[0], pitch, video->rotation);
+	sna_memcpy_plane(video, d, src, frame, 1);
 }
 
 static void
@@ -354,11 +346,22 @@ sna_copy_packed_data(struct sna_video *video,
 {
 	int pitch = frame->width << 1;
 	const uint8_t *src, *s;
-	int w = frame->npixels;
-	int h = frame->nlines;
+	int x, y, w, h;
 	int i, j;
 
-	src = buf + (frame->top * pitch) + (frame->left << 1);
+	if (video->textured) {
+		/* XXX support copying cropped extents */
+		x = y = 0;
+		w = frame->width;
+		h = frame->height;
+	} else {
+		x = frame->image.x1;
+		y = frame->image.y1;
+		w = frame->image.x2 - frame->image.x1;
+		h = frame->image.y2 - frame->image.y1;
+	}
+
+	src = buf + (y * pitch) + (x << 1);
 
 	switch (video->rotation) {
 	case RR_Rotate_0:
@@ -381,7 +384,7 @@ sna_copy_packed_data(struct sna_video *video,
 			src += pitch;
 		}
 		h >>= 1;
-		src = buf + (frame->top * pitch) + (frame->left << 1);
+		src = buf + (y * pitch) + (x << 1);
 		for (i = 0; i < h; i += 2) {
 			for (j = 0; j < w; j += 2) {
 				/* Copy U */
@@ -417,7 +420,7 @@ sna_copy_packed_data(struct sna_video *video,
 			src += pitch;
 		}
 		h >>= 1;
-		src = buf + (frame->top * pitch) + (frame->left << 1);
+		src = buf + (y * pitch) + (x << 1);
 		for (i = 0; i < h; i += 2) {
 			for (j = 0; j < w; j += 2) {
 				/* Copy U */
@@ -433,43 +436,44 @@ sna_copy_packed_data(struct sna_video *video,
 }
 
 bool
-sna_video_copy_data(struct sna *sna,
-		    struct sna_video *video,
+sna_video_copy_data(struct sna_video *video,
 		    struct sna_video_frame *frame,
 		    const uint8_t *buf)
 {
 	uint8_t *dst;
 
-	DBG(("%s: handle=%d, size=%dx%d, rotation=%d\n",
+	DBG(("%s: handle=%d, size=%dx%d [%d], pitch=[%d,%d] rotation=%d, is-texture=%d\n",
 	     __FUNCTION__, frame->bo ? frame->bo->handle : 0,
-	     frame->width, frame->height, video->rotation));
-	DBG(("%s: top=%d, left=%d\n", __FUNCTION__, frame->top, frame->left));
+	     frame->width, frame->height, frame->size, frame->pitch[0], frame->pitch[1],
+	     video->rotation, video->textured));
+	DBG(("%s: image=(%d, %d), (%d, %d), source=(%d, %d), (%d, %d)\n",
+	     __FUNCTION__,
+	     frame->image.x1, frame->image.y1, frame->image.x2, frame->image.y2,
+	     frame->src.x1, frame->src.y1, frame->src.x2, frame->src.y2));
+	assert(frame->width && frame->height);
+	assert(frame->size);
 
 	/* In the common case, we can simply the upload in a single pwrite */
-	if (video->rotation == RR_Rotate_0) {
+	if (video->rotation == RR_Rotate_0 && !video->tiled) {
+		DBG(("%s: unrotated, untiled fast paths: is-planar?=%d\n",
+		     __FUNCTION__, is_planar_fourcc(frame->id)));
 		if (is_planar_fourcc(frame->id)) {
-			uint16_t pitch[2] = {
-				ALIGN((frame->width >> 1), 0x4),
-				ALIGN(frame->width, 0x4),
-			};
-			if (pitch[0] == frame->pitch[0] &&
-			    pitch[1] == frame->pitch[1] &&
-			    frame->top == 0 && frame->left == 0) {
+			int w = frame->image.x2 - frame->image.x1;
+			int h = frame->image.y2 - frame->image.y1;
+			if (ALIGN(h, 2) == frame->height &&
+			    ALIGN(w >> 1, 4) == frame->pitch[0] &&
+			    ALIGN(w, 4) == frame->pitch[1]) {
 				if (frame->bo) {
-					kgem_bo_write(&sna->kgem, frame->bo,
-						      buf,
-						      pitch[1]*frame->height +
-						      pitch[0]*frame->height);
+					kgem_bo_write(&video->sna->kgem, frame->bo,
+						      buf, frame->size);
 				} else {
-					frame->bo = kgem_create_buffer(&sna->kgem, frame->size,
+					frame->bo = kgem_create_buffer(&video->sna->kgem, frame->size,
 								       KGEM_BUFFER_WRITE | KGEM_BUFFER_WRITE_INPLACE,
 								       (void **)&dst);
 					if (frame->bo == NULL)
 						return false;
 
-					memcpy(dst, buf,
-					       pitch[1]*frame->height +
-					       pitch[0]*frame->height);
+					memcpy(dst, buf, frame->size);
 				}
 				if (frame->id != FOURCC_I420) {
 					uint32_t tmp;
@@ -482,32 +486,34 @@ sna_video_copy_data(struct sna *sna,
 		} else {
 			if (frame->width*2 == frame->pitch[0]) {
 				if (frame->bo) {
-					kgem_bo_write(&sna->kgem, frame->bo,
-						      buf + (frame->top * frame->width*2) + (frame->left << 1),
-						      frame->nlines*frame->width*2);
+					kgem_bo_write(&video->sna->kgem, frame->bo,
+						      buf + (2U*frame->image.y1 * frame->width) + (frame->image.x1 << 1),
+						      2U*(frame->image.y2-frame->image.y1)*frame->width);
 				} else {
-					frame->bo = kgem_create_buffer(&sna->kgem, frame->size,
+					frame->bo = kgem_create_buffer(&video->sna->kgem, frame->size,
 								       KGEM_BUFFER_WRITE | KGEM_BUFFER_WRITE_INPLACE,
 								       (void **)&dst);
 					if (frame->bo == NULL)
 						return false;
 
 					memcpy(dst,
-					       buf + (frame->top * frame->width*2) + (frame->left << 1),
-					       frame->nlines*frame->width*2);
+					       buf + (frame->image.y1 * frame->width*2) + (frame->image.x1 << 1),
+					       2U*(frame->image.y2-frame->image.y1)*frame->width);
 				}
 				return true;
 			}
 		}
+
+		DBG(("%s: source cropped, fallback\n", __FUNCTION__));
 	}
 
 	/* copy data, must use GTT so that we keep the overlay uncached */
 	if (frame->bo) {
-		dst = kgem_bo_map__gtt(&sna->kgem, frame->bo);
+		dst = kgem_bo_map__gtt(&video->sna->kgem, frame->bo);
 		if (dst == NULL)
 			return false;
 	} else {
-		frame->bo = kgem_create_buffer(&sna->kgem, frame->size,
+		frame->bo = kgem_create_buffer(&video->sna->kgem, frame->size,
 					       KGEM_BUFFER_WRITE | KGEM_BUFFER_WRITE_INPLACE,
 					       (void **)&dst);
 		if (frame->bo == NULL)
@@ -522,51 +528,150 @@ sna_video_copy_data(struct sna *sna,
 	return true;
 }
 
+XvAdaptorPtr sna_xv_adaptor_alloc(struct sna *sna)
+{
+	XvAdaptorPtr new_adaptors;
+
+	new_adaptors = realloc(sna->xv.adaptors,
+			       (sna->xv.num_adaptors+1)*sizeof(XvAdaptorRec));
+	if (new_adaptors == NULL)
+		return NULL;
+
+	if (sna->xv.num_adaptors && new_adaptors != sna->xv.adaptors) {
+		XvAdaptorPtr adaptor = new_adaptors;
+		int i = sna->xv.num_adaptors, j;
+		while (i--) {
+			for (j = 0; j < adaptor->nPorts; j++)
+				adaptor->pPorts[j].pAdaptor = adaptor;
+			adaptor++;
+		}
+	}
+
+	sna->xv.adaptors = new_adaptors;
+	return &sna->xv.adaptors[sna->xv.num_adaptors++];
+}
+
+int
+sna_xv_alloc_port(unsigned long port, XvPortPtr in, XvPortPtr *out)
+{
+	*out = in;
+	return Success;
+}
+
+int
+sna_xv_free_port(XvPortPtr port)
+{
+	return Success;
+}
+
+int
+sna_xv_fixup_formats(ScreenPtr screen, XvFormatPtr formats, int num_formats)
+{
+	XvFormatPtr out = formats;
+	int count = 0;
+
+	while (num_formats--) {
+		int num_visuals = screen->numVisuals;
+		VisualPtr v = screen->visuals;
+
+		while (num_visuals--) {
+			if (v->class == TrueColor &&
+			    v->nplanes == formats->depth) {
+				int tmp = out[count].depth;
+				out[count].depth = formats->depth;
+				out[count].visual = v->vid;
+				formats->depth = tmp;
+				count++;
+				break;
+			}
+			v++;
+		}
+
+		formats++;
+	}
+
+	return count;
+}
+
+static int
+sna_xv_query_adaptors(ScreenPtr screen,
+		      XvAdaptorPtr *adaptors,
+		      int *num_adaptors)
+{
+	struct sna *sna = to_sna_from_screen(screen);
+
+	*num_adaptors = sna->xv.num_adaptors;
+	*adaptors = sna->xv.adaptors;
+	return Success;
+}
+
+static Bool
+sna_xv_close_screen(CLOSE_SCREEN_ARGS_DECL)
+{
+	struct sna *sna = to_sna_from_screen(screen);
+	int i;
+
+	for (i = 0; i < sna->xv.num_adaptors; i++) {
+		free(sna->xv.adaptors[i].pPorts->devPriv.ptr);
+		free(sna->xv.adaptors[i].pPorts);
+		free(sna->xv.adaptors[i].pEncodings);
+	}
+	free(sna->xv.adaptors);
+
+	sna->xv.adaptors = NULL;
+	sna->xv.num_adaptors = 0;
+
+	return TRUE;
+}
+
 void sna_video_init(struct sna *sna, ScreenPtr screen)
 {
-	XF86VideoAdaptorPtr *adaptors, *newAdaptors;
-	XF86VideoAdaptorPtr textured, overlay;
-	int num_adaptors;
-	int prefer_overlay =
-	    xf86ReturnOptValBool(sna->Options, OPTION_PREFER_OVERLAY, false);
+	XvScreenPtr xv;
 
-	if (!xf86LoaderCheckSymbol("xf86XVListGenericAdaptors"))
+	if (noXvExtension)
 		return;
 
-	adaptors = NULL;
-	num_adaptors = xf86XVListGenericAdaptors(sna->scrn, &adaptors);
-	newAdaptors = realloc(adaptors,
-			      (num_adaptors + 2) * sizeof(XF86VideoAdaptorPtr));
-	if (newAdaptors == NULL) {
+	if (xf86LoaderCheckSymbol("xf86XVListGenericAdaptors")) {
+		XF86VideoAdaptorPtr *adaptors = NULL;
+		int num_adaptors = xf86XVListGenericAdaptors(sna->scrn, &adaptors);
+		if (num_adaptors)
+			xf86DrvMsg(sna->scrn->scrnIndex, X_ERROR,
+				   "Ignoring generic xf86XV adaptors");
 		free(adaptors);
-		return;
 	}
-	adaptors = newAdaptors;
 
-	/* Set up textured video if we can do it at this depth and we are on
-	 * supported hardware.
-	 */
-	textured = sna_video_textured_setup(sna, screen);
-	overlay = sna_video_sprite_setup(sna, screen);
-	if (overlay == NULL)
-		overlay = sna_video_overlay_setup(sna, screen);
+	if (XvScreenInit(screen) != Success)
+		return;
 
-	if (overlay && prefer_overlay)
-		adaptors[num_adaptors++] = overlay;
+	xv = to_xv(screen);
+	xv->ddCloseScreen = sna_xv_close_screen;
+	xv->ddQueryAdaptors = sna_xv_query_adaptors;
 
-	if (textured)
-		adaptors[num_adaptors++] = textured;
+	sna_video_textured_setup(sna, screen);
+	sna_video_sprite_setup(sna, screen);
+	sna_video_overlay_setup(sna, screen);
 
-	if (overlay && !prefer_overlay)
-		adaptors[num_adaptors++] = overlay;
+	if (sna->xv.num_adaptors >= 2 &&
+	    xf86ReturnOptValBool(sna->Options, OPTION_PREFER_OVERLAY, false)) {
+		XvAdaptorRec tmp;
 
-	if (num_adaptors)
-		xf86XVScreenInit(screen, adaptors, num_adaptors);
-	else
-		xf86DrvMsg(sna->scrn->scrnIndex, X_WARNING,
-			   "Disabling Xv because no adaptors could be initialized.\n");
-	if (textured)
-		sna_video_xvmc_setup(sna, screen, textured);
+		tmp = sna->xv.adaptors[0];
+		sna->xv.adaptors[0] = sna->xv.adaptors[1];
+		sna->xv.adaptors[1] = tmp;
+	}
 
-	free(adaptors);
+	xv->nAdaptors = sna->xv.num_adaptors;
+	xv->pAdaptors = sna->xv.adaptors;
+
+	sna_video_xvmc_setup(sna, screen);
+}
+
+void sna_video_destroy_window(WindowPtr win)
+{
+	XvPortPtr port;
+
+	port = sna_window_get_port(win);
+	if (port)
+		port->pAdaptor->ddStopVideo(NULL, port, &win->drawable);
+	assert(sna_window_get_port(win) == NULL);
 }

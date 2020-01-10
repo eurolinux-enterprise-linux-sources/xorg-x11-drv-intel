@@ -25,21 +25,50 @@
 
 #include "fb.h"
 
+static Bool region_grow(RegionPtr region)
+{
+	RegDataPtr data;
+	int n;
+
+	n = 16;
+	if (!region->data) {
+		region->data = malloc(RegionSizeof(n));
+		if (!region->data)
+			return RegionBreak(region);
+		region->data->numRects = 1;
+		*RegionBoxptr(region) = region->extents;
+	} else if (!region->data->size) {
+		region->data = malloc(RegionSizeof(n));
+		if (!region->data)
+			return RegionBreak(region);
+		region->data->numRects = 0;
+	} else {
+		n = 2 * region->data->numRects;
+		data = (RegDataPtr) realloc(region->data, RegionSizeof(n));
+		if (!data)
+			return RegionBreak(region);
+		region->data = data;
+	}
+	region->data->size = n;
+	return TRUE;
+}
+
 static inline void add(RegionPtr region,
 		       int16_t x1, int16_t y1, int16_t x2, int16_t y2)
 {
 	BoxPtr r;
 
-	if (region->data->numRects == region->data->size)
-		RegionRectAlloc(region, 1);
+	if (region->data->numRects == region->data->size &&
+	    !region_grow(region))
+		return;
 
 	r = RegionBoxptr(region) + region->data->numRects++;
 	r->x1 = x1; r->y1 = y1;
 	r->x2 = x2; r->y2 = y2;
 
-	DBG(("%s[%d/%d]: (%d, %d), (%d, %d)\n",
+	DBG(("%s[%ld/%ld]: (%d, %d), (%d, %d)\n",
 	     __FUNCTION__,
-	     region->data->numRects, region->data->size,
+	     (long)region->data->numRects, (long)region->data->size,
 	     x1, y1, x2, y2));
 
 	if (x1 < region->extents.x1)
@@ -47,6 +76,8 @@ static inline void add(RegionPtr region,
 	if (x2 > region->extents.x2)
 		region->extents.x2 = x2;
 }
+
+#define MASK_0 (FB_ALLONES & ~FbScrRight(FB_ALLONES, 1))
 
 /* Convert bitmap clip mask into clipping region.
  * First, goes through each line and makes boxes by noting the transitions
@@ -57,7 +88,7 @@ static inline void add(RegionPtr region,
 RegionPtr
 fbBitmapToRegion(PixmapPtr pixmap)
 {
-	const register FbBits mask0 = FB_ALLONES & ~FbScrRight(FB_ALLONES, 1);
+	FbBits maskw;
 	register RegionPtr region;
 	const FbBits *bits, *line, *end;
 	int width, y1, y2, base, x1;
@@ -74,6 +105,9 @@ fbBitmapToRegion(PixmapPtr pixmap)
 	stride = pixmap->devKind >> (FB_SHIFT - 3);
 
 	width = pixmap->drawable.width;
+	maskw = 0;
+	if (width & 7)
+		maskw = FB_ALLONES & ~FbScrRight(FB_ALLONES, width & FB_MASK);
 	region->extents.x1 = width;
 	region->extents.x2 = 0;
 	y2 = 0;
@@ -82,10 +116,11 @@ fbBitmapToRegion(PixmapPtr pixmap)
 		bits = line;
 		line += stride;
 		while (y2 < pixmap->drawable.height &&
-		       memcmp(bits, line, (width+7)>>3) == 0)
+		       memcmp(bits, line, width >> 3) == 0 &&
+		       (maskw == 0 || (bits[width >> FB_SHIFT] & maskw) == (line[width >> FB_SHIFT] & maskw)))
 			line += stride, y2++;
 
-		if (READ(bits) & mask0)
+		if (READ(bits) & MASK_0)
 			x1 = 0;
 		else
 			x1 = -1;
@@ -102,7 +137,7 @@ fbBitmapToRegion(PixmapPtr pixmap)
 					continue;
 			}
 			for (i = 0; i < FB_UNIT; i++) {
-				if (w & mask0) {
+				if (w & MASK_0) {
 					if (x1 < 0)
 						x1 = base + i;
 				} else {
@@ -117,7 +152,7 @@ fbBitmapToRegion(PixmapPtr pixmap)
 		if (width & FB_MASK) {
 			FbBits w = READ(bits++);
 			for (i = 0; i < (width & FB_MASK); i++) {
-				if (w & mask0) {
+				if (w & MASK_0) {
 					if (x1 < 0)
 						x1 = base + i;
 				} else {
@@ -143,11 +178,11 @@ fbBitmapToRegion(PixmapPtr pixmap)
 	} else
 		region->extents.x1 = region->extents.x2 = 0;
 
-	DBG(("%s: region extents=(%d, %d), (%d, %d) x %d\n",
+	DBG(("%s: region extents=(%d, %d), (%d, %d) x %ld\n",
 	     __FUNCTION__,
 	     region->extents.x1, region->extents.y1,
 	     region->extents.x2, region->extents.y2,
-	     RegionNumRects(region)));
+	     (long)RegionNumRects(region)));
 
 	return region;
 }

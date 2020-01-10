@@ -18,7 +18,7 @@
 #  IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
 #  CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
-SUBDIRS = fb
+SUBDIRS = brw fb
 
 AM_CFLAGS = \
 	@CWARNFLAGS@ \
@@ -29,14 +29,16 @@ AM_CFLAGS = \
 	@DRM_CFLAGS@ \
 	$(NULL)
 
-if DEBUG
+if VALGRIND
 AM_CFLAGS += @VALGRIND_CFLAGS@
 endif
 
 noinst_LTLIBRARIES = libsna.la
-libsna_la_LIBADD = @UDEV_LIBS@ -lm @DRM_LIBS@ fb/libfb.la
+libsna_la_LDFLAGS = -pthread
+libsna_la_LIBADD = @UDEV_LIBS@ -lm @DRM_LIBS@ brw/libbrw.la fb/libfb.la
 
 libsna_la_SOURCES = \
+	atomic.h \
 	blt.c \
 	compiler.h \
 	kgem.c \
@@ -46,9 +48,11 @@ libsna_la_SOURCES = \
 	sna_accel.c \
 	sna_blt.c \
 	sna_composite.c \
+	sna_cpu.c \
 	sna_damage.c \
 	sna_damage.h \
 	sna_display.c \
+	sna_display_fake.c \
 	sna_driver.c \
 	sna_glyphs.c \
 	sna_gradient.c \
@@ -62,6 +66,8 @@ libsna_la_SOURCES = \
 	sna_trapezoids.c \
 	sna_tiling.c \
 	sna_transform.c \
+	sna_threads.c \
+	sna_vertex.c \
 	sna_video.c \
 	sna_video.h \
 	sna_video_overlay.c \
@@ -73,6 +79,10 @@ libsna_la_SOURCES = \
 	gen3_render.h \
 	gen4_render.c \
 	gen4_render.h \
+	gen4_source.c \
+	gen4_source.h \
+	gen4_vertex.c \
+	gen4_vertex.h \
 	gen5_render.c \
 	gen5_render.h \
 	gen6_render.c \
@@ -84,7 +94,7 @@ libsna_la_SOURCES = \
 if DRI2
 AM_CFLAGS += @DRI_CFLAGS@
 libsna_la_SOURCES += sna_dri.c
-libsna_la_LIBADD += $(DRI_LIBS)
+libsna_la_LIBADD += $(DRI_LIBS) @CLOCK_GETTIME_LIBS@
 endif
 
 if XVMC

@@ -35,7 +35,23 @@ THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define SNA_XVMC 1
 #endif
 
+/*
+ * Below, a dummy picture type that is used in XvPutImage
+ * only to do an overlay update.
+ * Introduced for the XvMC client lib.
+ * Defined to have a zero data size.
+ */
+#define XVMC_YUV { \
+	FOURCC_XVMC, XvYUV, LSBFirst, \
+	{'X', 'V', 'M', 'C', 0x00, 0x00, 0x00, 0x10, 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}, \
+	12, XvPlanar, 3, 0, 0, 0, 0, 8, 8, 8, 1, 2, 2, 1, 2, 2, \
+	{'Y', 'V', 'U', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, \
+	XvTopToBottom \
+}
+
 struct sna_video {
+	struct sna *sna;
+
 	int brightness;
 	int contrast;
 	int saturation;
@@ -57,6 +73,8 @@ struct sna_video {
 	struct kgem_bo *old_buf[2];
 	struct kgem_bo *buf;
 
+	int alignment;
+	bool tiled;
 	bool textured;
 	Rotation rotation;
 	int plane;
@@ -75,16 +93,34 @@ struct sna_video_frame {
 	uint16_t pitch[2];
 
 	/* extents */
-	uint16_t top, left;
-	uint16_t npixels, nlines;
+	BoxRec image;
+	BoxRec src;
 };
 
+static inline XvScreenPtr to_xv(ScreenPtr screen)
+{
+	return dixLookupPrivate(&screen->devPrivates, XvGetScreenKey());
+}
+
 void sna_video_init(struct sna *sna, ScreenPtr screen);
-XF86VideoAdaptorPtr sna_video_overlay_setup(struct sna *sna, ScreenPtr screen);
-XF86VideoAdaptorPtr sna_video_sprite_setup(struct sna *sna, ScreenPtr screen);
-XF86VideoAdaptorPtr sna_video_textured_setup(struct sna *sna, ScreenPtr screen);
+void sna_video_overlay_setup(struct sna *sna, ScreenPtr screen);
+void sna_video_sprite_setup(struct sna *sna, ScreenPtr screen);
+void sna_video_textured_setup(struct sna *sna, ScreenPtr screen);
+void sna_video_destroy_window(WindowPtr win);
+
+XvAdaptorPtr sna_xv_adaptor_alloc(struct sna *sna);
+int sna_xv_fixup_formats(ScreenPtr screen,
+			 XvFormatPtr formats,
+			 int num_formats);
+int sna_xv_alloc_port(unsigned long port, XvPortPtr in, XvPortPtr *out);
+int sna_xv_free_port(XvPortPtr port);
 
 #define FOURCC_XVMC     (('C' << 24) + ('M' << 16) + ('V' << 8) + 'X')
+
+static inline int xvmc_passthrough(int id)
+{
+	return id == FOURCC_XVMC;
+}
 
 static inline int is_planar_fourcc(int id)
 {
@@ -113,25 +149,33 @@ sna_video_clip_helper(ScrnInfoPtr scrn,
 		      RegionPtr reg);
 
 void
-sna_video_frame_init(struct sna *sna,
-		     struct sna_video *video,
+sna_video_frame_init(struct sna_video *video,
 		     int id, short width, short height,
 		     struct sna_video_frame *frame);
 
 struct kgem_bo *
-sna_video_buffer(struct sna *sna,
-		 struct sna_video *video,
+sna_video_buffer(struct sna_video *video,
 		 struct sna_video_frame *frame);
 
 bool
-sna_video_copy_data(struct sna *sna,
-		    struct sna_video *video,
+sna_video_copy_data(struct sna_video *video,
 		    struct sna_video_frame *frame,
 		    const uint8_t *buf);
 
-void sna_video_buffer_fini(struct sna *sna,
-			   struct sna_video *video);
+void sna_video_buffer_fini(struct sna_video *video);
 
-void sna_video_free_buffers(struct sna *sna, struct sna_video *video);
+void sna_video_free_buffers(struct sna_video *video);
+
+static inline XvPortPtr
+sna_window_get_port(WindowPtr window)
+{
+	return ((void **)__get_private(window, sna_window_key))[2];
+}
+
+static inline void
+sna_window_set_port(WindowPtr window, XvPortPtr port)
+{
+	((void **)__get_private(window, sna_window_key))[2] = port;
+}
 
 #endif /* SNA_VIDEO_H */

@@ -23,16 +23,16 @@
 # Initialize Autoconf
 AC_PREREQ([2.60])
 AC_INIT([xf86-video-intel],
-        [2.20.2],
+        [2.21.12],
         [https://bugs.freedesktop.org/enter_bug.cgi?product=xorg],
         [xf86-video-intel])
 AC_CONFIG_SRCDIR([Makefile.am])
 AC_CONFIG_HEADERS([config.h])
+AC_CONFIG_MACRO_DIR([m4])
 AC_CONFIG_AUX_DIR(.)
 
 # Initialize Automake
 AM_INIT_AUTOMAKE([foreign dist-bzip2])
-AM_MAINTAINER_MODE
 
 # Require X.Org macros 1.8 or later for MAN_SUBSTS set by XORG_MANPAGE_SECTIONS
 m4_ifndef([XORG_MACROS_VERSION],
@@ -81,13 +81,78 @@ else
   fi
 fi
 
+AC_ARG_ENABLE(gen4asm,
+              AS_HELP_STRING([--enable-gen4asm],
+			     [Enable rebuilding the gen4 assembly files [default=no]]),
+              [ASM="$enableval"],
+              [ASM=no])
 
-PKG_CHECK_MODULES(GEN4ASM, [intel-gen4asm >= 1.2], [gen4asm=yes], [gen4asm=no])
+gen4asm=no
+if test x$ASM != "xno"; then
+	PKG_CHECK_MODULES(GEN4ASM, [intel-gen4asm >= 1.2], [gen4asm=yes], [gen4asm=no])
+	if test x$ASM = "xyes" -a x$gen4asm != "xyes"; then
+		AC_MSG_ERROR([intel-gen4asm support requested but not found])
+	fi
+	if test x$gen4asm = "xyes"; then
+		AC_MSG_CHECKING([path to use for intel-gen4asm])
+		INTEL_GEN4ASM="`pkg-config intel-gen4asm --variable=exec_prefix`/bin/intel-gen4asm"
+		if ! test -e "$INTEL_GEN4ASM"; then
+			AC_MSG_ERROR([intel-gen4asm enabled, but not found. Tried '$INTEL_GEN4ASM'.])
+		fi
+		AC_MSG_RESULT([$INTEL_GEN4ASM])
+		AC_SUBST([INTEL_GEN4ASM])
+	fi
+fi
 AM_CONDITIONAL(HAVE_GEN4ASM, test x$gen4asm = xyes)
 
-PKG_CHECK_MODULES(UDEV, [libudev], [udev=yes], [udev=no])
-if test x"$udev" = xyes; then
-	AC_DEFINE(HAVE_UDEV,1,[Enable udev-based monitor hotplug detection])
+# Check for atomic intrinsics
+AC_CACHE_CHECK([for native atomic primitives], intel_cv_atomic_primitives,
+[
+    intel_cv_atomic_primitives="none"
+
+    AC_LINK_IFELSE([AC_LANG_PROGRAM([[
+int atomic_add(int i) { return __sync_fetch_and_add (&i, 1); }
+int atomic_cmpxchg(int i, int j, int k) { return __sync_val_compare_and_swap (&i, j, k); }
+				    ]],[[]])],
+		   [intel_cv_atomic_primitives="Intel"],[])
+
+    if test "x$intel_cv_atomic_primitives" = "xnone"; then
+	    AC_CHECK_HEADER([atomic_ops.h], intel_cv_atomic_primitives="libatomic-ops")
+    fi
+
+    # atomic functions defined in <atomic.h> & libc on Solaris
+    if test "x$intel_cv_atomic_primitives" = "xnone"; then
+	    AC_CHECK_FUNC([atomic_cas_uint],
+			  intel_cv_atomic_primitives="Solaris")
+    fi
+
+])
+if test "x$intel_cv_atomic_primitives" = xIntel; then
+    AC_DEFINE(HAVE_ATOMIC_PRIMITIVES, 1,
+	      [Enable if your compiler supports the Intel __sync_* atomic primitives])
+fi
+if test "x$intel_cv_atomic_primitives" = "xlibatomic-ops"; then
+    AC_DEFINE(HAVE_LIB_ATOMIC_OPS, 1, [Enable if you have libatomic-ops-dev installed])
+fi
+
+if test "x$intel_cv_atomic_primitives" = "xnone"; then
+		AC_MSG_ERROR([xf86-video-intel depends upon atomic operations, which were not found for your compiler/cpu. Try compiling with -march=native, or install the libatomics-op-dev package.])
+fi
+
+AC_ARG_ENABLE(udev,
+              AS_HELP_STRING([--disable-udev],
+                             [Disable udev-based monitor hotplug detection [default=auto]]),
+              [UDEV="$enableval"],
+              [UDEV=auto])
+
+if test x$UDEV != "xno"; then
+	PKG_CHECK_MODULES(UDEV, [libudev], [udev=yes], [udev=no])
+	if test x$UDEV = xyes -a x$udev != xyes; then
+		AC_MSG_ERROR([udev support requested but not found (libudev)])
+	fi
+	if test x$udev = xyes; then
+		AC_DEFINE(HAVE_UDEV,1,[Enable udev-based monitor hotplug detection])
+	fi
 fi
 
 PKG_CHECK_MODULES(X11, [x11 xrender xext pixman-1], [x11=yes], [x11=no])
@@ -104,6 +169,8 @@ AC_ARG_WITH(xorg-module-dir,
 
 AC_ARG_ENABLE(dri, AS_HELP_STRING([--disable-dri],
                                   [Disable DRI support [[default=auto]]]))
+dridriverdir=`$PKG_CONFIG --variable=dridriverdir dri`
+AC_DEFINE_DIR(DRI_DRIVER_PATH, dridriverdir, [Default DRI driver path])
 
 AC_ARG_ENABLE(xvmc, AS_HELP_STRING([--disable-xvmc],
                                   [Disable XvMC support [[default=yes]]]),
@@ -114,12 +181,20 @@ AC_ARG_ENABLE(kms-only, AS_HELP_STRING([--enable-kms-only],
                                   [Assume KMS support [[default=no]]]),
               [KMS_ONLY="$enableval"],
               [KMS_ONLY=no])
+AC_ARG_ENABLE(ums-only, AS_HELP_STRING([--enable-ums-only],
+                                  [Assume only UMS (no KMS) support [[default=no]]]),
+              [UMS_ONLY="$enableval"],
+              [UMS_ONLY=no])
 
-required_xorg_xserver_version=1.6
-required_pixman_version=0.24
+required_xorg_server_version=1.6
+required_pixman_version=0.16
 
 if pkg-config --exists 'pixman-1 >= 0.27.1'; then
 	AC_DEFINE([HAS_PIXMAN_GLYPHS], 1, [Enable pixman glyph cache])
+fi
+
+if pkg-config --exists 'pixman-1 >= 0.24.0'; then
+	AC_DEFINE([HAS_PIXMAN_TRIANGLES], 1, [Enable pixman triangle rasterisation])
 fi
 
 AC_ARG_ENABLE(sna,
@@ -128,13 +203,9 @@ AC_ARG_ENABLE(sna,
 	      [SNA="$enableval"],
 	      [SNA=auto])
 
-AC_CHECK_HEADERS([sys/sysinfo.h], , SNA=no)
-if test "x$SNA" = "xauto" && pkg-config --exists "xorg-server >= 1.10"; then
-	SNA=yes
-fi
 if test "x$SNA" != "xno"; then
-	required_xorg_xserver_version=1.10
 	AC_DEFINE(USE_SNA, 1, [Enable SNA support])
+	AC_CHECK_HEADERS([sys/sysinfo.h])
 fi
 AC_MSG_CHECKING([whether to include SNA support])
 AM_CONDITIONAL(SNA, test x$SNA != xno)
@@ -144,14 +215,24 @@ AC_ARG_ENABLE(uxa,
 	      AS_HELP_STRING([--enable-uxa],
 			     [Enable Unified Acceleration Architecture (UXA) [default=yes]]),
 	      [UXA="$enableval"],
-	      [UXA=yes])
+	      [UXA=auto])
 AC_MSG_CHECKING([whether to include UXA support])
-AM_CONDITIONAL(UXA, test x$UXA != xno)
-AC_MSG_RESULT([$UXA])
+if test "x$UXA" = "xauto"; then
+	if ! pkg-config --exists 'libdrm_intel >= 2.4.29'; then
+		UXA=no
+	fi
+	if ! pkg-config --exists 'pixman-1 >= 0.24.0'; then
+		UXA=no
+	fi
+fi
 if test "x$UXA" != "xno"; then
 	AC_DEFINE(USE_UXA, 1, [Enable UXA support])
 	PKG_CHECK_MODULES(DRMINTEL, [libdrm_intel >= 2.4.29])
+	required_pixman_version=0.24
+	UXA=yes
 fi
+AC_MSG_RESULT([$UXA])
+AM_CONDITIONAL(UXA, test x$UXA != xno)
 
 AC_MSG_CHECKING([whether to include GLAMOR support])
 AC_ARG_ENABLE(glamor,
@@ -168,7 +249,7 @@ if test "x$GLAMOR" != "xno"; then
 fi
 
 
-PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_xserver_version xproto fontsproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
+PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_server_version xproto fontsproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
 
 AC_ARG_ENABLE(xaa,
 	      AS_HELP_STRING([--enable-xaa],
@@ -219,12 +300,12 @@ if test "x$accel" = xauto; then
 			accel=sna
 		fi
 	fi
-	if test "x$accel" = xauto; then
+	if test "x$accel" = xauto -a "x$UMS_ONLY" != "xyes"; then
 		AC_MSG_ERROR([No default acceleration option])
 	fi
 fi
 
-have_accel=no
+have_accel=none
 if test "x$accel" = xsna; then
 	if test "x$SNA" != "xno"; then
 		AC_DEFINE(DEFAULT_ACCEL_METHOD, SNA, [Default acceleration method])
@@ -243,8 +324,18 @@ if test "x$accel" = xuxa; then
 	fi
 fi
 AC_MSG_RESULT($accel)
-if test "x$accel" = xno; then
+if test "x$accel" = xnone -a "x$UMS_ONLY" != "xyes"; then
 	AC_MSG_ERROR([No default acceleration option])
+fi
+
+AC_ARG_ENABLE(create2,
+	      AS_HELP_STRING([--enable-create2],
+			     [Enable use of create2 ioctl (experimental) [default=no]]),
+	      [CREATE2="$enableval"],
+	      [CREATE2=no])
+AM_CONDITIONAL(USE_CREATE2, test x$CREATE2 = xyes)
+if test "x$CREATE2" = xyes; then
+	AC_DEFINE(USE_CREATE2,1,[Assume "create2" support])
 fi
 
 AC_ARG_ENABLE(userptr,
@@ -254,7 +345,7 @@ AC_ARG_ENABLE(userptr,
 	      [USERPTR=no])
 AM_CONDITIONAL(USE_USERPTR, test x$USERPTR = xyes)
 if test "x$USERPTR" = xyes; then
-	AC_DEFINE(USE_USERPTR,1,[Assume USERPTR support])
+	AC_DEFINE(USE_USERPTR,1,[Assume "userptr" support])
 fi
 
 AC_ARG_ENABLE(async-swap,
@@ -272,6 +363,12 @@ AC_ARG_ENABLE(debug,
 			     [Enables internal debugging [default=no]]),
               [DEBUG="$enableval"],
               [DEBUG=no])
+AC_ARG_ENABLE(valgrind,
+	      AS_HELP_STRING([--enable-valgrind],
+			     [Enables valgrindified ioctls for debugging [default=no]]),
+              [VG="$enableval"],
+              [VG=no])
+
 # Store the list of server defined optional extensions in REQUIRED_MODULES
 XORG_DRIVER_CHECK_EXT(RANDR, randrproto)
 XORG_DRIVER_CHECK_EXT(RENDER, renderproto)
@@ -279,10 +376,14 @@ XORG_DRIVER_CHECK_EXT(XF86DRI, xextproto x11)
 XORG_DRIVER_CHECK_EXT(DPMSExtension, xextproto)
 
 # Obtain compiler/linker options for the driver dependencies
-PKG_CHECK_MODULES(DRM, [libdrm >= 2.4.24]) # libdrm_intel is checked separately
+PKG_CHECK_MODULES(DRM, [libdrm >= 2.4.20]) # libdrm_intel is checked separately
 PKG_CHECK_MODULES(DRI, [xf86driproto], , DRI=no)
 PKG_CHECK_MODULES(DRI2, [dri2proto >= 2.6],, DRI2=no)
 PKG_CHECK_MODULES(PCIACCESS, [pciaccess >= 0.10])
+
+LIBS=""
+AC_SEARCH_LIBS(clock_gettime, rt, [CLOCK_GETTIME_LIBS=$LIBS])
+AC_SUBST(CLOCK_GETTIME_LIBS)
 
 sdkdir=`$PKG_CONFIG --variable=sdkdir xorg-server`
 
@@ -335,9 +436,8 @@ AM_CONDITIONAL(DRI2, test "x$DRI2" = xyes)
 AC_MSG_RESULT([$DRI2])
 
 if test "$XVMC" = yes; then
-	PKG_CHECK_MODULES(XVMCLIB,
-			  [xvmc xext xfixes dri2proto x11-xcb xcb-dri2 xcb-aux],
-			  [XVMC=yes], [XVMC=no])
+	PKG_CHECK_MODULES(XVMCLIB, [xvmc dri2proto x11], [], [XVMC=no])
+	PKG_CHECK_MODULES(XCB, [x11-xcb xcb-dri2 xcb-aux], [], [XVMC=no])
 fi
 AC_MSG_CHECKING([whether to include XvMC support])
 AC_MSG_RESULT([$XVMC])
@@ -350,17 +450,36 @@ AM_CONDITIONAL(KMS_ONLY, test x$KMS_ONLY = xyes)
 if test "x$KMS_ONLY" = xyes; then
 	AC_DEFINE(KMS_ONLY,1,[Assume KMS support])
 fi
+AM_CONDITIONAL(UMS_ONLY, test x$UMS_ONLY = xyes)
+if test "x$UMS_ONLY" = xyes; then
+	AC_DEFINE(UMS_ONLY,1,[Assume only UMS (no KMS) support])
+fi
 
 AM_CONDITIONAL(DEBUG, test x$DEBUG != xno)
-AM_CONDITIONAL(FULL_DEBUG, test x$FULL_DEBUG == xfull)
+AM_CONDITIONAL(FULL_DEBUG, test x$DEBUG = xfull)
 if test "x$DEBUG" = xno; then
 	AC_DEFINE(NDEBUG,1,[Disable internal debugging])
+else
+	if test "x$VG" != xyes; then
+		VG=auto
+	fi
 fi
-if test "x$DEBUG" != xno; then
+have_valgrind=no
+if test "x$VG" != xno; then
 	PKG_CHECK_MODULES(VALGRIND, [valgrind], have_valgrind=yes, have_valgrind=no)
+	AC_MSG_CHECKING([whether to include valgrind support])
 	if test x$have_valgrind = xyes; then
 		AC_DEFINE([HAVE_VALGRIND], 1, [Use valgrind intrinsics to suppress false warnings])
+	else
+		if test "x$VG" = xyes; then
+			AC_MSG_ERROR([valgrind support requested, but valgrind-dev headers not found])
+		fi
 	fi
+	AC_MSG_RESULT([$have_valgrind ($VG)])
+fi
+AM_CONDITIONAL(VALGRIND, test x$have_valgrind = xyes)
+if test "x$DEBUG" = xsync; then
+	AC_DEFINE(DEBUG_SYNC,1,[Enable synchronous rendering for debugging])
 fi
 if test "x$DEBUG" = xmemory; then
 	AC_DEFINE(DEBUG_MEMORY,1,[Enable memory debugging])
@@ -391,6 +510,7 @@ AC_CONFIG_FILES([
                 src/legacy/i810/Makefile
                 src/legacy/i810/xvmc/Makefile
                 src/sna/Makefile
+                src/sna/brw/Makefile
                 src/sna/fb/Makefile
                 man/Makefile
                 src/render_program/Makefile

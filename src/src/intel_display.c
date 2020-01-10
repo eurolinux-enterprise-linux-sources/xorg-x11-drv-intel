@@ -31,6 +31,7 @@
 
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/poll.h>
 #include <fcntl.h>
 #include <unistd.h>
 #include <errno.h>
@@ -41,6 +42,7 @@
 
 #include "intel.h"
 #include "intel_bufmgr.h"
+#include "intel_options.h"
 #include "xf86drm.h"
 #include "xf86drmMode.h"
 #include "X11/Xatom.h"
@@ -50,6 +52,8 @@
 #include "uxa.h"
 
 #include "intel_glamor.h"
+
+#define KNOWN_MODE_FLAGS ((1<<14)-1)
 
 struct intel_mode {
 	int fd;
@@ -85,6 +89,8 @@ struct intel_crtc {
 	uint32_t rotate_fb_id;
 	xf86CrtcPtr crtc;
 	struct list link;
+	PixmapPtr scanout_pixmap;
+	uint32_t scanout_fb_id;
 };
 
 struct intel_property {
@@ -121,6 +127,72 @@ intel_output_dpms(xf86OutputPtr output, int mode);
 static void
 intel_output_dpms_backlight(xf86OutputPtr output, int oldmode, int mode);
 
+static inline int
+crtc_id(struct intel_crtc *crtc)
+{
+	return crtc->mode_crtc->crtc_id;
+}
+
+#ifdef __OpenBSD__
+
+#include <dev/wscons/wsconsio.h>
+#include "xf86Priv.h"
+
+static void
+intel_output_backlight_set(xf86OutputPtr output, int level)
+{
+	struct intel_output *intel_output = output->driver_private;
+	struct wsdisplay_param param;
+
+	if (level > intel_output->backlight_max)
+		level = intel_output->backlight_max;
+	if (! intel_output->backlight_iface || level < 0)
+		return;
+
+	param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	param.curval = level;
+	if (ioctl(xf86Info.consoleFd, WSDISPLAYIO_SETPARAM, &param) == -1) {
+		xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+			   "Failed to set backlight level: %s\n",
+			   strerror(errno));
+	}
+}
+
+static int
+intel_output_backlight_get(xf86OutputPtr output)
+{
+	struct wsdisplay_param param;
+
+	param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	if (ioctl(xf86Info.consoleFd, WSDISPLAYIO_GETPARAM, &param) == -1) {
+		xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+			   "Failed to get backlight level: %s\n",
+			   strerror(errno));
+		return -1;
+	}
+
+	return param.curval;
+}
+
+static void
+intel_output_backlight_init(xf86OutputPtr output)
+{
+	struct intel_output *intel_output = output->driver_private;
+	struct wsdisplay_param param;
+
+	param.param = WSDISPLAYIO_PARAM_BRIGHTNESS;
+	if (ioctl(xf86Info.consoleFd, WSDISPLAYIO_GETPARAM, &param) == -1) {
+		intel_output->backlight_iface = NULL;
+		return;
+	}
+
+	intel_output->backlight_iface = "wscons";
+	intel_output->backlight_max = param.max;
+	intel_output->backlight_active_level = param.curval;
+}
+
+#else
+
 #define BACKLIGHT_CLASS "/sys/class/backlight"
 
 /*
@@ -148,12 +220,6 @@ static const char *backlight_interfaces[] = {
 #define BACKLIGHT_PATH_LEN 80
 /* Enough for 10 digits of backlight + '\n' + '\0' */
 #define BACKLIGHT_VALUE_LEN 12
-
-static inline int
-crtc_id(struct intel_crtc *crtc)
-{
-	return crtc->mode_crtc->crtc_id;
-}
 
 static void
 intel_output_backlight_set(xf86OutputPtr output, int level)
@@ -252,19 +318,37 @@ static void
 intel_output_backlight_init(xf86OutputPtr output)
 {
 	struct intel_output *intel_output = output->driver_private;
+	intel_screen_private *intel = intel_get_screen_private(output->scrn);
+	char path[BACKLIGHT_PATH_LEN];
+	struct stat buf;
+	char *str;
 	int i;
 
-	for (i = 0; backlight_interfaces[i] != NULL; i++) {
-		char path[BACKLIGHT_PATH_LEN];
-		struct stat buf;
+	str = xf86GetOptValString(intel->Options, OPTION_BACKLIGHT);
+	if (str != NULL) {
+		sprintf(path, "%s/%s", BACKLIGHT_CLASS, str);
+		if (!stat(path, &buf)) {
+			intel_output->backlight_iface = str;
+			intel_output->backlight_max = intel_output_backlight_get_max(output);
+			if (intel_output->backlight_max > 0) {
+				intel_output->backlight_active_level = intel_output_backlight_get(output);
+				xf86DrvMsg(output->scrn->scrnIndex, X_CONFIG,
+					   "found backlight control interface %s\n", path);
+				return;
+			}
+		}
+		xf86DrvMsg(output->scrn->scrnIndex, X_ERROR,
+			   "unrecognised backlight control interface %s\n", str);
+	}
 
+	for (i = 0; backlight_interfaces[i] != NULL; i++) {
 		sprintf(path, "%s/%s", BACKLIGHT_CLASS, backlight_interfaces[i]);
 		if (!stat(path, &buf)) {
 			intel_output->backlight_iface = backlight_interfaces[i];
 			intel_output->backlight_max = intel_output_backlight_get_max(output);
 			if (intel_output->backlight_max > 0) {
 				intel_output->backlight_active_level = intel_output_backlight_get(output);
-				xf86DrvMsg(output->scrn->scrnIndex, X_INFO,
+				xf86DrvMsg(output->scrn->scrnIndex, X_PROBED,
 					   "found backlight control interface %s\n", path);
 				return;
 			}
@@ -273,6 +357,7 @@ intel_output_backlight_init(xf86OutputPtr output)
 	intel_output->backlight_iface = NULL;
 }
 
+#endif
 
 static void
 mode_from_kmode(ScrnInfoPtr scrn,
@@ -296,13 +381,16 @@ mode_from_kmode(ScrnInfoPtr scrn,
 	mode->VTotal = kmode->vtotal;
 	mode->VScan = kmode->vscan;
 
-	mode->Flags = kmode->flags; //& FLAG_BITS;
+	mode->Flags = kmode->flags;
 	mode->name = strdup(kmode->name);
 
 	if (kmode->type & DRM_MODE_TYPE_DRIVER)
 		mode->type = M_T_DRIVER;
 	if (kmode->type & DRM_MODE_TYPE_PREFERRED)
 		mode->type |= M_T_PREFERRED;
+
+	if (mode->status == MODE_OK && kmode->flags & ~KNOWN_MODE_FLAGS)
+		mode->status = MODE_BAD; /* unknown flags => unhandled */
 
 	xf86SetModeCrtc (mode, scrn->adjustFlags);
 }
@@ -327,7 +415,7 @@ mode_to_kmode(ScrnInfoPtr scrn,
 	kmode->vtotal = mode->VTotal;
 	kmode->vscan = mode->VScan;
 
-	kmode->flags = mode->Flags; //& FLAG_BITS;
+	kmode->flags = mode->Flags;
 	if (mode->name)
 		strncpy(kmode->name, mode->name, DRM_DISPLAY_MODE_LEN);
 	kmode->name[DRM_DISPLAY_MODE_LEN-1] = 0;
@@ -383,13 +471,15 @@ intel_crtc_apply(xf86CrtcPtr crtc)
 		output_count++;
 	}
 
+	if (!intel_crtc->scanout_fb_id) {
 #if XORG_VERSION_CURRENT < XORG_VERSION_NUMERIC(1,5,99,0,0)
-	if (!xf86CrtcRotate(crtc, mode, rotation))
-		goto done;
+		if (!xf86CrtcRotate(crtc, mode, rotation))
+			goto done;
 #else
-	if (!xf86CrtcRotate(crtc))
-		goto done;
+		if (!xf86CrtcRotate(crtc))
+			goto done;
 #endif
+	}
 
 #if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,7,0,0,0)
 	crtc->funcs->gamma_set(crtc, crtc->gamma_red, crtc->gamma_green,
@@ -401,6 +491,10 @@ intel_crtc_apply(xf86CrtcPtr crtc)
 	fb_id = mode->fb_id;
 	if (intel_crtc->rotate_fb_id) {
 		fb_id = intel_crtc->rotate_fb_id;
+		x = 0;
+		y = 0;
+	} else if (intel_crtc->scanout_fb_id && intel_crtc->scanout_pixmap->drawable.width >= crtc->mode.HDisplay && intel_crtc->scanout_pixmap->drawable.height >= crtc->mode.VDisplay) {
+		fb_id = intel_crtc->scanout_fb_id;
 		x = 0;
 		y = 0;
 	}
@@ -462,6 +556,8 @@ intel_crtc_set_mode_major(xf86CrtcPtr crtc, DisplayModePtr mode,
 			ErrorF("failed to add fb\n");
 			return FALSE;
 		}
+
+		drm_intel_bo_disable_reuse(intel->front_buffer);
 	}
 
 	saved_mode = crtc->mode;
@@ -566,6 +662,8 @@ intel_crtc_shadow_allocate(xf86CrtcPtr crtc, int width, int height)
 		return NULL;
 	}
 
+	drm_intel_bo_disable_reuse(intel_crtc->rotate_bo);
+
 	intel_crtc->rotate_pitch = rotate_pitch;
 	return intel_crtc->rotate_bo;
 }
@@ -666,6 +764,42 @@ intel_crtc_destroy(xf86CrtcPtr crtc)
 	crtc->driver_private = NULL;
 }
 
+#ifdef INTEL_PIXMAP_SHARING
+static Bool
+intel_set_scanout_pixmap(xf86CrtcPtr crtc, PixmapPtr ppix)
+{
+	struct intel_crtc *intel_crtc = crtc->driver_private;
+	ScrnInfoPtr scrn = crtc->scrn;
+	intel_screen_private *intel = intel_get_screen_private(scrn);
+	dri_bo *bo;
+
+	if (ppix == intel_crtc->scanout_pixmap)
+		return TRUE;
+
+	if (!ppix) {
+		intel_crtc->scanout_pixmap = NULL;
+		if (intel_crtc->scanout_fb_id) {
+			drmModeRmFB(intel->drmSubFD, intel_crtc->scanout_fb_id);
+			intel_crtc->scanout_fb_id = 0;
+		}
+		return TRUE;
+	}
+
+	bo = intel_get_pixmap_bo(ppix);
+	if (intel->front_buffer) {
+		ErrorF("have front buffer\n");
+	}
+
+	drm_intel_bo_disable_reuse(bo);
+
+	intel_crtc->scanout_pixmap = ppix;
+	return drmModeAddFB(intel->drmSubFD, ppix->drawable.width,
+			   ppix->drawable.height, ppix->drawable.depth,
+			   ppix->drawable.bitsPerPixel, ppix->devKind,
+			   bo->handle, &intel_crtc->scanout_fb_id) == 0;
+}
+#endif
+
 static const xf86CrtcFuncsRec intel_crtc_funcs = {
 	.dpms = intel_crtc_dpms,
 	.set_mode_major = intel_crtc_set_mode_major,
@@ -679,6 +813,9 @@ static const xf86CrtcFuncsRec intel_crtc_funcs = {
 	.shadow_destroy = intel_crtc_shadow_destroy,
 	.gamma_set = intel_crtc_gamma_set,
 	.destroy = intel_crtc_destroy,
+#ifdef INTEL_PIXMAP_SHARING
+	.set_scanout_pixmap = intel_set_scanout_pixmap,
+#endif
 };
 
 static void
@@ -1367,7 +1504,6 @@ intel_output_init(ScrnInfoPtr scrn, struct intel_mode *mode, int num)
 		intel_output_backlight_init(output);
 
 	output->possible_crtcs = kencoder->possible_crtcs;
-	output->possible_clones = kencoder->possible_clones;
 	output->interlaceAllowed = TRUE;
 
 	intel_output->output = output;
@@ -1427,6 +1563,7 @@ intel_xf86crtc_resize(ScrnInfoPtr scrn, int width, int height)
 	if (ret)
 		goto fail;
 
+	drm_intel_bo_disable_reuse(intel->front_buffer);
 	intel->front_pitch = pitch;
 	intel->front_tiling = tiling;
 
@@ -1477,17 +1614,18 @@ intel_do_pageflip(intel_screen_private *intel,
 	struct intel_mode *mode = crtc->mode;
 	unsigned int pitch = scrn->displayWidth * intel->cpp;
 	struct intel_pageflip *flip;
-	int i, old_fb_id;
+	uint32_t new_fb_id;
+	int i;
 
 	/*
 	 * Create a new handle for the back buffer
 	 */
-	old_fb_id = mode->fb_id;
 	if (drmModeAddFB(mode->fd, scrn->virtualX, scrn->virtualY,
 			 scrn->depth, scrn->bitsPerPixel, pitch,
-			 new_front->handle, &mode->fb_id))
+			 new_front->handle, &new_fb_id))
 		goto error_out;
 
+	drm_intel_bo_disable_reuse(new_front);
 	intel_glamor_flush(intel);
 	intel_batch_submit(scrn);
 
@@ -1505,7 +1643,7 @@ intel_do_pageflip(intel_screen_private *intel,
 	mode->fe_tv_usec = 0;
 
 	for (i = 0; i < config->num_crtc; i++) {
-		if (!config->crtc[i]->enabled)
+		if (!intel_crtc_on(config->crtc[i]))
 			continue;
 
 		mode->flip_info = flip_info;
@@ -1528,7 +1666,7 @@ intel_do_pageflip(intel_screen_private *intel,
 
 		if (drmModePageFlip(mode->fd,
 				    crtc_id(crtc),
-				    mode->fb_id,
+				    new_fb_id,
 				    DRM_MODE_PAGE_FLIP_EVENT, flip)) {
 			xf86DrvMsg(scrn->scrnIndex, X_WARNING,
 				   "flip queue failed: %s\n", strerror(errno));
@@ -1537,12 +1675,16 @@ intel_do_pageflip(intel_screen_private *intel,
 		}
 	}
 
-	mode->old_fb_id = old_fb_id;
+	mode->old_fb_id = mode->fb_id;
+	mode->fb_id = new_fb_id;
 	return TRUE;
 
 error_undo:
-	drmModeRmFB(mode->fd, mode->fb_id);
-	mode->fb_id = old_fb_id;
+	drmModeRmFB(mode->fd, new_fb_id);
+	for (i = 0; i < config->num_crtc; i++) {
+		if (config->crtc[i]->enabled)
+			intel_crtc_apply(config->crtc[i]);
+	}
 
 error_out:
 	xf86DrvMsg(scrn->scrnIndex, X_WARNING, "Page flip failed: %s\n",
@@ -1608,6 +1750,60 @@ drm_wakeup_handler(pointer data, int err, pointer p)
 		drmHandleEvent(mode->fd, &mode->event_context);
 }
 
+static drmModeEncoderPtr
+intel_get_kencoder(struct intel_mode *mode, int num)
+{
+	struct intel_output *iterator;
+	int id = mode->mode_res->encoders[num];
+
+	list_for_each_entry(iterator, &mode->outputs, link)
+		if (iterator->mode_encoder->encoder_id == id)
+			return iterator->mode_encoder;
+
+	return NULL;
+}
+
+/*
+ * Libdrm's possible_clones is a mask of encoders, Xorg's possible_clones is a
+ * mask of outputs. This function sets Xorg's possible_clones based on the
+ * values read from libdrm.
+ */
+static void
+intel_compute_possible_clones(ScrnInfoPtr scrn, struct intel_mode *mode)
+{
+	xf86CrtcConfigPtr config = XF86_CRTC_CONFIG_PTR(scrn);
+	struct intel_output *intel_output, *clone;
+	drmModeEncoderPtr cloned_encoder;
+	uint32_t mask;
+	int i, j, k;
+	CARD32 possible_clones;
+
+	for (i = 0; i < config->num_output; i++) {
+		possible_clones = 0;
+		intel_output = config->output[i]->driver_private;
+
+		mask = intel_output->mode_encoder->possible_clones;
+		for (j = 0; mask != 0; j++, mask >>= 1) {
+
+			if ((mask & 1) == 0)
+				continue;
+
+			cloned_encoder = intel_get_kencoder(mode, j);
+			if (!cloned_encoder)
+				continue;
+
+			for (k = 0; k < config->num_output; k++) {
+				clone = config->output[k]->driver_private;
+				if (clone->mode_encoder->encoder_id ==
+				    cloned_encoder->encoder_id)
+					possible_clones |= (1 << k);
+			}
+		}
+
+		config->output[i]->possible_clones = possible_clones;
+	}
+}
+
 Bool intel_mode_pre_init(ScrnInfoPtr scrn, int fd, int cpp)
 {
 	intel_screen_private *intel = intel_get_screen_private(scrn);
@@ -1643,6 +1839,12 @@ Bool intel_mode_pre_init(ScrnInfoPtr scrn, int fd, int cpp)
 
 	for (i = 0; i < mode->mode_res->count_connectors; i++)
 		intel_output_init(scrn, mode, i);
+
+	intel_compute_possible_clones(scrn, mode);
+
+#ifdef INTEL_PIXMAP_SHARING
+	xf86ProviderSetup(scrn, NULL, "Intel");
+#endif
 
 	xf86InitialConfiguration(scrn, TRUE);
 
@@ -1691,10 +1893,37 @@ intel_mode_remove_fb(intel_screen_private *intel)
 	}
 }
 
+static Bool has_pending_events(int fd)
+{
+	struct pollfd pfd;
+	pfd.fd = fd;
+	pfd.events = POLLIN;
+	return poll(&pfd, 1, 0) == 1;
+}
+
+void
+intel_mode_close(intel_screen_private *intel)
+{
+	struct intel_mode *mode = intel->modes;
+
+	if (mode == NULL)
+		return;
+
+	while (has_pending_events(mode->fd))
+		drmHandleEvent(mode->fd, &mode->event_context);
+
+	RemoveBlockAndWakeupHandlers((BlockHandlerProcPtr)NoopDDA,
+				     drm_wakeup_handler, mode);
+	RemoveGeneralSocket(mode->fd);
+}
+
 void
 intel_mode_fini(intel_screen_private *intel)
 {
 	struct intel_mode *mode = intel->modes;
+
+	if (mode == NULL)
+		return;
 
 	while(!list_is_empty(&mode->crtcs)) {
 		xf86CrtcDestroy(list_first_entry(&mode->crtcs,
@@ -1884,7 +2113,9 @@ void intel_copy_fb(ScrnInfoPtr scrn)
 				0, 0,
 				scrn->virtualX, scrn->virtualY);
 	intel->uxa_driver->done_copy(dst);
+#if ABI_VIDEODRV_VERSION >= SET_ABI_VERSION(10, 0)
 	pScreen->canDoBGNoneRoot = TRUE;
+#endif
 
 cleanup_dst:
 	(*pScreen->DestroyPixmap)(dst);
