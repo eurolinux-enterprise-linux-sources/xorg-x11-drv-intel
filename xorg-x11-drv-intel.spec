@@ -1,7 +1,7 @@
 %define moduledir %(pkg-config xorg-server --variable=moduledir )
 %define driverdir	%{moduledir}/drivers
 %define gputoolsver 1.9
-%define gitdate 20151206
+%define gitdate 20160929
 %define gitrev .%{gitdate}
 
 %undefine _hardened_build
@@ -28,7 +28,7 @@
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
 Version:   2.99.917
-Release:   22%{?gitrev}%{?dist}
+Release:   26%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -44,16 +44,11 @@ Source4:    make-git-snapshot.sh
 
 Patch0:	    intel-gcc-pr65873.patch
 Patch1:	    igt-stat.patch
-
-# Fixes for not picking up MST hotplugs
-Patch2:     Revert-sna-Refresh-last-detection-timestamp-on-hotpl.patch
-
-# KBL PCI IDs:
-Patch10:	0001-pciids-Add-more-Kabylake-PCI-IDs.patch
-Patch11:	0002-pciids-Removing-PCI-IDs-that-are-no-longer-listed-as.patch
-
-# SKL GT4 PCI IDs:
-Patch20:	0001-Sync-PCI-ids-with-latest-kernel-adding-SKL-GT4.patch
+# Fedora specific modification: Do not use intel driver for skylake+
+# The intel driver is too much of a moving target / too buggy.
+Patch2:     0001-sna-Let-modestting-glamor-handle-gen9.patch
+# https://bugs.freedesktop.org/show_bug.cgi?id=96255#c11
+Patch4:     0001-sna-Avoid-clobbering-output-physical-size-with-xf86O.patch
 
 ExclusiveArch: %{ix86} x86_64 ia64
 
@@ -70,8 +65,12 @@ BuildRequires: libXrandr-devel
 BuildRequires: libXrender-devel
 BuildRequires: libXtst-devel
 BuildRequires: libXvMC-devel
-BuildRequires: libXfont-devel
 BuildRequires: libxshmfence-devel
+%if 0%{?fedora} > 24 || 0%{?rhel7}
+BuildRequires: libXfont2-devel
+%else
+BuildRequires: libXfont-devel
+%endif
 BuildRequires: mesa-libGL-devel >= 6.5-9
 BuildRequires: libdrm-devel >= 2.4.25
 BuildRequires: kernel-headers >= 2.6.32.3
@@ -80,6 +79,9 @@ BuildRequires: libxcb-devel >= 1.5
 BuildRequires: xcb-util-devel
 BuildRequires: cairo-devel
 BuildRequires: python
+BuildRequires: libXScrnSaver-devel
+BuildRequires: libXext-devel
+BuildRequires: pixman-devel
 
 Requires: Xorg %(xserver-sdk-abi-requires ansic)
 Requires: Xorg %(xserver-sdk-abi-requires videodrv)
@@ -113,11 +115,8 @@ Debugging tools for Intel graphics chips
 %prep
 %setup -q -n xf86-video-intel-%{?gitdate:%{gitdate}}%{!?gitdate:%{dirsuffix}} -b3
 %patch0 -p1 -b .gcc
-%patch2 -p1 -b .mst-hpd-fix
-
-%patch10 -p1 -b .kblid1
-%patch11 -p1 -b .kblid2
-%patch20 -p1 -b .sklgt4
+%patch2 -p1
+%patch4 -p1
 
 pushd ../intel-gpu-tools-%{gputoolsver}
 %patch1 -p1 -b .stat
@@ -125,7 +124,7 @@ popd
 
 %build
 autoreconf -f -i -v
-%configure %{?kmsonly:--enable-kms-only} --enable-tools
+%configure %{?kmsonly:--enable-kms-only} --with-default-dri=3 --enable-tools
 make %{?_smp_mflags} V=1
 
 pushd ../intel-gpu-tools-%{gputoolsver}
@@ -180,20 +179,43 @@ rm -f $RPM_BUILD_ROOT%{_libdir}/libI*XvMC.so
 %doc COPYING
 %{_bindir}/gem_userptr_benchmark
 %{_bindir}/intel*
+%exclude %{_bindir}/intel-gen4asm
+%exclude %{_bindir}/intel-gen4disasm
 %{_datadir}/gtk-doc
 %{_mandir}/man1/intel_*.1*
 
 %changelog
-* Tue Sep 06 2016 Adam Jackson <ajax@redhat.com> - 2.99.917-22.20151109
-- Update more skl pci ids
+* Thu Sep 29 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-26
+- Update to latest git master for use with xserver-1.19
+- Rebuild against xserver-1.19
 
-* Tue Aug 09 2016 Rob Clark <rclark@redhat.com> - 2.99.917-21.20151109
-- update kbl pci ids
+* Wed Jul 20 2016 Bastien Nocera <bnocera@redhat.com> - 2.99.917-25
+- Avoid clobbering output physical size, should fix hidpi on Surface 3
 
-* Wed May 18 2016 Lyude Paul <cpaul@redhat.com> - 2.99.917-20.20151109
-- Update to upstream package.
-- Fix trailing whitespace
-- Add some patches to fix issues with ignoring DP MST hotplugs
+* Tue Jul 12 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-24.20160712
+- Git snapshot du jour, bringing in a bunch of bugfixes
+- Fix dpi issues on Surface 3 (also needs some kernel fixes)
+- Hopefully fix rhbz#1354124
+
+* Thu May 12 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-23.20160512
+- Update to 20160512 snapshot
+- This fixes laptops with switchable graphics hanging after a dpms off of
+  the lcd screen (rhbz#1334581)
+- Fix fd-leak when falling back to mode-setting on skylake, this fixes
+  Xorg exiting with a "drmSetMaster failed" error when not using server
+  managed fds (e.g. using a different login manager then gdm)
+- Fix duplicate binaries in -devel / intel-gpu-tools subpackages (rhbz#1323641)
+
+* Mon Mar 07 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-22.20160119
+- xorg-x11-drv-intel hardly has any accel on skylake and newer, so make
+  Xorg fallback to modesetting + glamor by returning FALSE from probe
+- Using glamor also gives us proper Xvideo support on skylake (rhbz#1305369)
+
+* Fri Feb 05 2016 Fedora Release Engineering <releng@fedoraproject.org> - 2.99.917-21.20160119
+- Rebuilt for https://fedoraproject.org/wiki/Fedora_24_Mass_Rebuild
+
+* Tue Jan 19 2016 Kevin Fenzi <kevin@scrye.com> - 2.99.917-20-20160119
+- Update to 20160119 snapshot
 
 * Sun Dec 06 2015 Adel Gadllah <adel.gadllah@gmail.com> - 2.99.917-19.20151109
 - Update to 20151206 snapshot

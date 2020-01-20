@@ -244,7 +244,7 @@ static void intel_check_dri_option(ScrnInfoPtr scrn)
 
 	intel->dri2 = intel->dri3 = DRI_NONE;
 	level = intel_option_cast_to_unsigned(intel->Options, OPTION_DRI, DEFAULT_DRI_LEVEL);
-	if (level < 3)
+	if (level < 3 || INTEL_INFO(intel)->gen < 040)
 		intel->dri3 = DRI_DISABLED;
 	if (level < 2)
 		intel->dri2 = DRI_DISABLED;
@@ -652,8 +652,9 @@ redisplay_dirty(ScreenPtr screen, PixmapDirtyUpdatePtr dirty)
 }
 
 static void
-intel_dirty_update(ScreenPtr screen)
+intel_dirty_update(intel_screen_private *intel)
 {
+	ScreenPtr screen = xf86ScrnToScreen(intel->scrn);
 	RegionPtr region;
 	PixmapDirtyUpdatePtr ent;
 
@@ -670,6 +671,7 @@ intel_dirty_update(ScreenPtr screen)
 }
 #endif
 
+#if !HAVE_NOTIFY_FD
 static void
 I830BlockHandler(BLOCKHANDLER_ARGS_DECL)
 {
@@ -687,9 +689,22 @@ I830BlockHandler(BLOCKHANDLER_ARGS_DECL)
 	intel_uxa_block_handler(intel);
 	intel_video_block_handler(intel);
 #ifdef INTEL_PIXMAP_SHARING
-	intel_dirty_update(screen);
+	intel_dirty_update(intel);
 #endif
 }
+#else
+static void
+I830BlockHandler(void *data, void *timeout)
+{
+	intel_screen_private *intel = data;
+
+	intel_uxa_block_handler(intel);
+	intel_video_block_handler(intel);
+#ifdef INTEL_PIXMAP_SHARING
+	intel_dirty_update(intel);
+#endif
+}
+#endif
 
 static Bool
 intel_init_initial_framebuffer(ScrnInfoPtr scrn)
@@ -947,8 +962,14 @@ I830ScreenInit(SCREEN_INIT_ARGS_DECL)
 			   "Hardware cursor initialization failed\n");
 	}
 
+#if !HAVE_NOTIFY_FD
 	intel->BlockHandler = screen->BlockHandler;
 	screen->BlockHandler = I830BlockHandler;
+#else
+	RegisterBlockAndWakeupHandlers(I830BlockHandler,
+				       (ServerWakeupHandlerProcPtr)NoopDDA,
+				       intel);
+#endif
 
 #ifdef INTEL_PIXMAP_SHARING
 	screen->StartPixmapTracking = PixmapStartDirtyTracking;
@@ -1171,8 +1192,6 @@ static Bool I830CloseScreen(CLOSE_SCREEN_ARGS_DECL)
 	}
 
 	intel_sync_close(screen);
-
-	xf86GARTCloseScreen(scrn->scrnIndex);
 
 	scrn->vtSema = FALSE;
 	return TRUE;

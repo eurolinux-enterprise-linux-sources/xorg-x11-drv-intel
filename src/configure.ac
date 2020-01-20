@@ -280,6 +280,9 @@ PKG_CHECK_MODULES(X11_DRI3, [xcb-dri3 xcb-sync xcb-xfixes xcb-present x11-xcb xs
 AM_CONDITIONAL(X11_DRI3, test "x$x11_dri3" = "xyes" -a "x$shm" = "xyes")
 AM_CONDITIONAL(X11_SHM, test "x$shm" = "xyes")
 
+PKG_CHECK_MODULES(X11_VM, [xxf86vm], [x11_vm="yes"], [x11_vm="no"])
+AM_CONDITIONAL(X11_VM, test "x$x11_vm" = "xyes")
+
 AC_ARG_ENABLE(tools,
               AS_HELP_STRING([--disable-tools],
 			     [Enable building and installing the miscellaneous tools [default=auto]]),
@@ -291,7 +294,7 @@ if test "x$shm" != "xyes"; then
 	tools="no"
 fi
 if test "x$tools" != "xno"; then
-	ivo_requires="xrandr xdamage xfixes xcursor xtst xrender xext x11 pixman-1"
+	ivo_requires="xrandr xdamage xfixes xcursor xtst xrender xscrnsaver xext x11 pixman-1"
 	extra_cflags=""
 
 	ignore="xinerama"
@@ -442,7 +445,7 @@ if test "x$UXA" != "xno"; then
 	UXA=yes
 fi
 
-PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_server_version xproto fontsproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
+PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_server_version xproto fontsproto damageproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
 ABI_VERSION=`$PKG_CONFIG --variable=abi_videodrv xorg-server`
 XSERVER_VERSION=`$PKG_CONFIG --modversion xorg-server`
 PIXMAN_VERSION=`$PKG_CONFIG --modversion pixman-1`

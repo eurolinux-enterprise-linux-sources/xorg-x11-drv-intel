@@ -48,7 +48,12 @@ static const XvAttributeRec Attributes[] = {
 	//{XvSettable | XvGettable, 0, 255, (char *)"XV_CONTRAST"},
 };
 
-static const XvImageRec Images[] = {
+static const XvImageRec gen2_Images[] = {
+	XVIMAGE_YUY2,
+	XVIMAGE_UYVY,
+};
+
+static const XvImageRec gen3_Images[] = {
 	XVIMAGE_YUY2,
 	XVIMAGE_YV12,
 	XVIMAGE_I420,
@@ -156,12 +161,9 @@ sna_video_textured_put_image(ddPutImage_ARGS)
 	if (wedged(sna))
 		return BadAlloc;
 
-	clip.extents.x1 = draw->x + drw_x;
-	clip.extents.y1 = draw->y + drw_y;
-	clip.extents.x2 = clip.extents.x1 + drw_w;
-	clip.extents.y2 = clip.extents.y1 + drw_h;
-	clip.data = NULL;
+	init_video_region(&clip, draw, drw_x, drw_y, drw_w, drw_h);
 
+	ValidateGC(draw, gc);
 	RegionIntersect(&clip, &clip, gc->pCompositeClip);
 	if (!RegionNotEmpty(&clip))
 		return Success;
@@ -369,8 +371,13 @@ void sna_video_textured_setup(struct sna *sna, ScreenPtr screen)
 						 ARRAY_SIZE(Formats));
 	adaptor->nAttributes = ARRAY_SIZE(Attributes);
 	adaptor->pAttributes = (XvAttributeRec *)Attributes;
-	adaptor->nImages = ARRAY_SIZE(Images);
-	adaptor->pImages = (XvImageRec *)Images;
+	if (sna->kgem.gen < 030) {
+		adaptor->nImages = ARRAY_SIZE(gen2_Images);
+		adaptor->pImages = (XvImageRec *)gen2_Images;
+	} else {
+		adaptor->nImages = ARRAY_SIZE(gen3_Images);
+		adaptor->pImages = (XvImageRec *)gen3_Images;
+	}
 #if XORG_XV_VERSION < 2
 	adaptor->ddAllocatePort = sna_xv_alloc_port;
 	adaptor->ddFreePort = sna_xv_free_port;

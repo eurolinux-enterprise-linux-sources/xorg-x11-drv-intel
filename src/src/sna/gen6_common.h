@@ -46,19 +46,22 @@ inline static bool can_switch_to_blt(struct sna *sna,
 	if (sna->kgem.ring != KGEM_RENDER)
 		return true;
 
-	if (NO_RING_SWITCH(sna))
-		return false;
-
 	if (bo && RQ_IS_BLT(bo->rq))
 		return true;
 
 	if (bo && bo->tiling == I915_TILING_Y)
 		return false;
 
+	if (bo && !kgem_bo_can_blt(&sna->kgem, bo))
+		return false;
+
 	if (sna->render_state.gt < 2)
 		return true;
 
 	if (bo && RQ_IS_RENDER(bo->rq))
+		return false;
+
+	if (NO_RING_SWITCH(sna))
 		return false;
 
 	if (flags & COPY_LAST)
@@ -207,7 +210,7 @@ prefer_blt_fill(struct sna *sna, struct kgem_bo *bo, unsigned flags)
 		if (!prefer_blt_ring(sna, bo, 0))
 			return false;
 	} else {
-	    if (can_switch_to_blt(sna, bo, 0))
+	    if (can_switch_to_blt(sna, bo, COPY_LAST))
 		    return true;
 	}
 

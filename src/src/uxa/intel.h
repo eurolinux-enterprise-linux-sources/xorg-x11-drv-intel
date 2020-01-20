@@ -168,6 +168,7 @@ typedef struct intel_screen_private {
 	const struct intel_device_info *info;
 
 	unsigned int BR[20];
+	unsigned int BR_tiling[2];
 
 	CloseScreenProcPtr CloseScreen;
 
@@ -195,7 +196,9 @@ typedef struct intel_screen_private {
 
 	int colorKey;
 	XF86VideoAdaptorPtr adaptor;
+#if !HAVE_NOTIFY_FD
 	ScreenBlockHandlerProcPtr BlockHandler;
+#endif
 	Bool overlayOn;
 
 	struct {

@@ -437,7 +437,7 @@ static void setup_dri(struct sna *sna)
 
 	level = intel_option_cast_to_unsigned(sna->Options, OPTION_DRI, DEFAULT_DRI_LEVEL);
 #if HAVE_DRI3
-	if (level >= 3)
+	if (level >= 3 && sna->kgem.gen >= 040)
 		sna->dri3.available = !!xf86LoadSubModule(sna->scrn, "dri3");
 #endif
 #if HAVE_DRI2
@@ -461,13 +461,13 @@ static bool enable_tear_free(struct sna *sna)
 	return ENABLE_TEAR_FREE;
 }
 
-static void setup_tear_free(struct sna *sna)
+static bool setup_tear_free(struct sna *sna)
 {
 	MessageType from;
 	Bool enable;
 
 	if (sna->flags & SNA_LINEAR_FB)
-		return;
+		return false;
 
 	if ((sna->flags & SNA_HAS_FLIP) == 0) {
 		from = X_PROBED;
@@ -481,11 +481,12 @@ static void setup_tear_free(struct sna *sna)
 		from = X_CONFIG;
 
 	if (enable)
-		sna->flags |= SNA_TEAR_FREE;
+		sna->flags |= SNA_WANT_TEAR_FREE | SNA_TEAR_FREE;
 
 done:
 	xf86DrvMsg(sna->scrn->scrnIndex, from, "TearFree %sabled\n",
 		   sna->flags & SNA_TEAR_FREE ? "en" : "dis");
+	return sna->flags & SNA_TEAR_FREE;
 }
 
 /**
@@ -653,7 +654,8 @@ static Bool sna_pre_init(ScrnInfoPtr scrn, int probe)
 	}
 	scrn->currentMode = scrn->modes;
 
-	setup_tear_free(sna);
+	if (!setup_tear_free(sna) && sna_mode_wants_tear_free(sna))
+		sna->kgem.needs_dirtyfb = sna->kgem.has_dirtyfb;
 
 	xf86SetGamma(scrn, zeros);
 	xf86SetDpi(scrn, 0, 0);
@@ -679,6 +681,7 @@ cleanup:
 	return FALSE;
 }
 
+#if !HAVE_NOTIFY_FD
 static bool has_shadow(struct sna *sna)
 {
 	if (!sna->mode.shadow_enabled)
@@ -735,6 +738,31 @@ sna_wakeup_handler(WAKEUPHANDLER_ARGS_DECL)
 		FD_CLR(sna->kgem.fd, (fd_set*)read_mask);
 	}
 }
+#else
+static void
+sna_block_handler(void *data, void *_timeout)
+{
+	struct sna *sna = data;
+	int *timeout = _timeout;
+	struct timeval tv, *tvp;
+
+	DBG(("%s (timeout=%d)\n", __FUNCTION__, *timeout));
+	if (*timeout == 0)
+		return;
+
+	if (*timeout < 0) {
+		tvp = NULL;
+	} else {
+		tv.tv_sec = *timeout / 1000;
+		tv.tv_usec = (*timeout % 1000) * 1000;
+		tvp = &tv;
+	}
+
+	sna_accel_block(sna, &tvp);
+	if (tvp)
+		*timeout = tvp->tv_sec * 1000 + tvp->tv_usec / 1000;
+}
+#endif
 
 #if HAVE_UDEV
 #include <sys/stat.h>
@@ -921,6 +949,12 @@ static Bool sna_early_close_screen(CLOSE_SCREEN_ARGS_DECL)
 
 	/* XXX Note that we will leak kernel resources if !vtSema */
 
+#if HAVE_NOTIFY_FD
+	RemoveBlockAndWakeupHandlers(sna_block_handler,
+				     (ServerWakeupHandlerProcPtr)NoopDDA,
+				     sna);
+#endif
+
 	sna_uevent_fini(sna);
 	sna_mode_close(sna);
 
@@ -1071,7 +1105,8 @@ sna_screen_init(SCREEN_INIT_ARGS_DECL)
 	DBG(("%s\n", __FUNCTION__));
 
 	assert(sna->scrn == scrn);
-	assert(to_screen_from_sna(sna) == NULL); /* set afterwards */
+	assert(to_screen_from_sna(sna) == NULL || /* set afterwards */
+	       to_screen_from_sna(sna) == screen);
 
 	assert(sna->freed_pixmap == NULL);
 
@@ -1139,11 +1174,17 @@ sna_screen_init(SCREEN_INIT_ARGS_DECL)
 	 * later memory should be bound when allocating, e.g rotate_mem */
 	scrn->vtSema = TRUE;
 
+#if !HAVE_NOTIFY_FD
 	sna->BlockHandler = screen->BlockHandler;
 	screen->BlockHandler = sna_block_handler;
 
 	sna->WakeupHandler = screen->WakeupHandler;
 	screen->WakeupHandler = sna_wakeup_handler;
+#else
+	RegisterBlockAndWakeupHandlers(sna_block_handler,
+				       (ServerWakeupHandlerProcPtr)NoopDDA,
+				       sna);
+#endif
 
 	screen->SaveScreen = sna_save_screen;
 	screen->CreateScreenResources = sna_create_screen_resources;

@@ -59,8 +59,8 @@
 #define HAS_GCC(major, minor) defined(__GNUC__) && (__GNUC__ > (major) || __GNUC__ == (major) && __GNUC_MINOR__ >= (minor))
 
 #if HAS_GCC(4, 5)
-#define sse2 __attribute__((target("sse2,fpmath=sse")))
-#define sse4_2 __attribute__((target("sse4.2,sse2,fpmath=sse")))
+#define sse2 fast __attribute__((target("sse2,fpmath=sse")))
+#define sse4_2 fast __attribute__((target("sse4.2,sse2,fpmath=sse")))
 #endif
 
 #if HAS_GCC(4, 6) && defined(__OPTIMIZE__)
@@ -71,6 +71,11 @@
 
 #if HAS_GCC(4, 7)
 #define avx2 fast __attribute__((target("avx2,avx,sse4.2,sse2,fpmath=sse")))
+#define assume_aligned(ptr, align) __builtin_assume_aligned((ptr), (align))
+#define assume_misaligned(ptr, align, offset) __builtin_assume_aligned((ptr), (align), (offset))
+#else
+#define assume_aligned(ptr, align) (ptr)
+#define assume_misaligned(ptr, align, offset) (ptr)
 #endif
 
 #if HAS_GCC(4, 5) && defined(__OPTIMIZE__)

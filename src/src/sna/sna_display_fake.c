@@ -298,6 +298,7 @@ static bool add_fake_output(struct sna *sna, bool late)
 
 		RRCrtcSetRotations(crtc->randr_crtc,
 				   RR_Rotate_All | RR_Reflect_All);
+		RRCrtcGammaGet(crtc->randr_crtc);
 	}
 
 	sna->mode.num_fake++;
@@ -313,13 +314,16 @@ err:
 			continue;
 
 		xf86OutputDestroy(output);
+		i--;
 	}
 
 	for (i = 0; i < xf86_config->num_crtc; i++) {
 		crtc = xf86_config->crtc[i];
 		if (crtc->driver_private)
 			continue;
+
 		xf86CrtcDestroy(crtc);
+		i--;
 	}
 	sna->mode.num_fake = -1;
 	return false;
