@@ -28,7 +28,7 @@
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
 Version:   2.99.917
-Release:   26%{?gitrev}%{?dist}
+Release:   27%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -44,9 +44,6 @@ Source4:    make-git-snapshot.sh
 
 Patch0:	    intel-gcc-pr65873.patch
 Patch1:	    igt-stat.patch
-# Fedora specific modification: Do not use intel driver for skylake+
-# The intel driver is too much of a moving target / too buggy.
-Patch2:     0001-sna-Let-modestting-glamor-handle-gen9.patch
 # https://bugs.freedesktop.org/show_bug.cgi?id=96255#c11
 Patch4:     0001-sna-Avoid-clobbering-output-physical-size-with-xf86O.patch
 
@@ -115,7 +112,6 @@ Debugging tools for Intel graphics chips
 %prep
 %setup -q -n xf86-video-intel-%{?gitdate:%{gitdate}}%{!?gitdate:%{dirsuffix}} -b3
 %patch0 -p1 -b .gcc
-%patch2 -p1
 %patch4 -p1
 
 pushd ../intel-gpu-tools-%{gputoolsver}
@@ -185,6 +181,10 @@ rm -f $RPM_BUILD_ROOT%{_libdir}/libI*XvMC.so
 %{_mandir}/man1/intel_*.1*
 
 %changelog
+* Fri Jan 12 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-27
+- Re-enable skylake support, as we're now defaulting to modesetting in the
+  server.
+
 * Thu Sep 29 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-26
 - Update to latest git master for use with xserver-1.19
 - Rebuild against xserver-1.19
