@@ -212,7 +212,6 @@ fi
 
 PKG_CHECK_MODULES(X11, [x11 x11-xcb xcb-dri2 xcomposite xdamage xrender xrandr xext xfixes cairo cairo-xlib-xrender pixman-1 libpng], [x11="yes"], [x11="no"])
 AM_CONDITIONAL(HAVE_X11, test "x$x11" = "xyes")
-echo X11_CLFAGS="$X11_CLFAGS" X11_LIBS="$X11_LIBS"
 
 cpuid="yes"
 AC_TRY_LINK([
@@ -247,15 +246,38 @@ if test "x$ac_cv_header_X11_extensions_shmproto_h" != "xyes" -a "x$ac_cv_header_
 fi
 
 if test "x$shm" = "xyes"; then
+	AC_MSG_CHECKING(whether shmctl IPC_RMID allows subsequent attaches)
+	AC_TRY_RUN([
+		  #include <sys/types.h>
+		  #include <sys/ipc.h>
+		  #include <sys/shm.h>
+		  int main()
+		  {
+		      char *shmaddr;
+		      int id = shmget (IPC_PRIVATE, 4, IPC_CREAT | 0600);
+		      if (id == -1) return 2;
+		      shmaddr = shmat (id, 0, 0);
+		      shmctl (id, IPC_RMID, 0);
+		      if ((char*) shmat (id, 0, 0) == (char*) -1) {
+			  shmdt (shmaddr);
+			  return 1;
+		      }
+		      shmdt (shmaddr);
+		      shmdt (shmaddr);
+		      return 0;
+		  }
+		  ],
+		  AC_DEFINE(IPC_RMID_DEFERRED_RELEASE, 1,
+			    [Define to 1 if shared memory segments are released deferred.])
+		  AC_MSG_RESULT(yes),
+		  AC_MSG_RESULT(no),
+		  AC_MSG_RESULT(assuming no))
 	AC_DEFINE([HAVE_MIT_SHM], 1, [Define to 1 if MIT-SHM is available])
 fi
 
 PKG_CHECK_MODULES(X11_DRI3, [xcb-dri3 xcb-sync xcb-xfixes xcb-present x11-xcb xshmfence x11 xcomposite xdamage xrender xrandr xxf86vm xext libdrm], [x11_dri3="yes"], [x11_dri3="no"])
 AM_CONDITIONAL(X11_DRI3, test "x$x11_dri3" = "xyes" -a "x$shm" = "xyes")
 AM_CONDITIONAL(X11_SHM, test "x$shm" = "xyes")
-
-PKG_CHECK_MODULES(X11_VM, [xxf86vm], [x11_vm="yes"], [x11_vm="no"])
-AM_CONDITIONAL(X11_VM, test "x$x11_vm" = "xyes")
 
 AC_ARG_ENABLE(tools,
               AS_HELP_STRING([--disable-tools],
@@ -268,7 +290,7 @@ if test "x$shm" != "xyes"; then
 	tools="no"
 fi
 if test "x$tools" != "xno"; then
-	ivo_requires="xrandr xdamage xfixes xcursor xtst xrender xscrnsaver xext x11 pixman-1"
+	ivo_requires="xrandr xdamage xfixes xcursor xtst xrender xext x11 pixman-1"
 	extra_cflags=""
 
 	ignore="xinerama"
@@ -316,9 +338,9 @@ AC_ARG_ENABLE(dri,
 	      [DRI=auto])
 AC_ARG_ENABLE(dri1,
 	      AS_HELP_STRING([--disable-dri1],
-			     [Disable DRI1 support [[default=auto]]]),
+			     [Disable DRI1 support [[default=yes]]]),
 	      [DRI1=$enableval],
-	      [DRI1=auto])
+	      [DRI1=yes])
 AC_ARG_ENABLE(dri2,
 	      AS_HELP_STRING([--disable-dri2],
 			     [Disable DRI2 support [[default=yes]]]),
@@ -419,7 +441,7 @@ if test "x$UXA" != "xno"; then
 	UXA=yes
 fi
 
-PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_server_version xproto fontsproto damageproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
+PKG_CHECK_MODULES(XORG, [xorg-server >= $required_xorg_server_version xproto fontsproto pixman-1 >= $required_pixman_version $REQUIRED_MODULES])
 ABI_VERSION=`$PKG_CONFIG --variable=abi_videodrv xorg-server`
 XSERVER_VERSION=`$PKG_CONFIG --modversion xorg-server`
 PIXMAN_VERSION=`$PKG_CONFIG --modversion pixman-1`
@@ -842,7 +864,6 @@ AC_CONFIG_FILES([
                 xvmc/shader/mc/Makefile
                 xvmc/shader/vld/Makefile
 		test/Makefile
-		benchmarks/Makefile
 		tools/Makefile
 		tools/org.x.xf86-video-intel.backlight-helper.policy
 ])

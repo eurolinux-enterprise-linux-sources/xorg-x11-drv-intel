@@ -1,13 +1,14 @@
 %define moduledir %(pkg-config xorg-server --variable=moduledir )
 %define driverdir	%{moduledir}/drivers
 %define gputoolsver 1.9
-%define gitdate 20180530
+%define gitdate 20150615
 %define gitrev .%{gitdate}
-
-%undefine _hardened_build
 
 %if 0%{?rhel} == 7
 %define rhel7 1
+%endif
+%if 0%{?rhel} == 6
+%define rhel6 1
 %endif
 
 %if 0%{?rhel7} || 0%{?fedora} > 17
@@ -16,12 +17,16 @@
 
 %if 0%{?rhel7} || 0%{?fedora} > 20
 %define kmsonly 1
+%else
+%ifnarch %{ix86}
+%define kmsonly 1
+%endif
 %endif
 
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
 Version:   2.99.917
-Release:   28%{?gitrev}%{?dist}
+Release:   8%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -35,10 +40,6 @@ Source1:    make-intel-gpu-tools-snapshot.sh
 Source3:    http://xorg.freedesktop.org/archive/individual/app/intel-gpu-tools-%{gputoolsver}.tar.bz2
 Source4:    make-git-snapshot.sh
 
-Patch0:	    intel-gcc-pr65873.patch
-Patch1:	    igt-stat.patch
-# https://bugs.freedesktop.org/show_bug.cgi?id=96255#c11
-Patch4:     0001-sna-Avoid-clobbering-output-physical-size-with-xf86O.patch
 
 ExclusiveArch: %{ix86} x86_64 ia64
 
@@ -56,11 +57,6 @@ BuildRequires: libXrender-devel
 BuildRequires: libXtst-devel
 BuildRequires: libXvMC-devel
 BuildRequires: libxshmfence-devel
-%if 0%{?fedora} > 24 || 0%{?rhel7}
-BuildRequires: libXfont2-devel
-%else
-BuildRequires: libXfont-devel
-%endif
 BuildRequires: mesa-libGL-devel >= 6.5-9
 BuildRequires: libdrm-devel >= 2.4.25
 BuildRequires: kernel-headers >= 2.6.32.3
@@ -69,9 +65,6 @@ BuildRequires: libxcb-devel >= 1.5
 BuildRequires: xcb-util-devel
 BuildRequires: cairo-devel
 BuildRequires: python
-BuildRequires: libXScrnSaver-devel
-BuildRequires: libXext-devel
-BuildRequires: pixman-devel
 
 Requires: Xorg %(xserver-sdk-abi-requires ansic)
 Requires: Xorg %(xserver-sdk-abi-requires videodrv)
@@ -104,18 +97,11 @@ Debugging tools for Intel graphics chips
 
 %prep
 %setup -q -n xf86-video-intel-%{?gitdate:%{gitdate}}%{!?gitdate:%{dirsuffix}} -b3
-%patch0 -p1 -b .gcc
-%patch4 -p1
-
-pushd ../intel-gpu-tools-%{gputoolsver}
-%patch1 -p1 -b .stat
-popd
 
 %build
 autoreconf -f -i -v
-%configure %{?kmsonly:--enable-kms-only} --with-default-dri=3 --enable-tools || \
-    (cat config.log ; exit 1)
-make %{?_smp_mflags} V=1
+%configure %{?kmsonly:--enable-kms-only} --enable-tools
+make %{?_smp_mflags}
 
 pushd ../intel-gpu-tools-%{gputoolsver}
 # this is missing from the tarbal, having it empty is ok
@@ -169,96 +155,15 @@ rm -f $RPM_BUILD_ROOT%{_libdir}/libI*XvMC.so
 %doc COPYING
 %{_bindir}/gem_userptr_benchmark
 %{_bindir}/intel*
-%exclude %{_bindir}/intel-gen4asm
-%exclude %{_bindir}/intel-gen4disasm
 %{_datadir}/gtk-doc
 %{_mandir}/man1/intel_*.1*
 
 %changelog
-* Wed May 30 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-28
-- Today's git snapshot (commit 35947721)
+* Mon Jun 15 2015 Dave Airlie <airlied@redhat.com> 2.99.917-8
+- update with newer snapshot - fixes some PRIME issues
 
-* Wed May 30 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-27.20160929.1
-- Rebuild for xserver 1.20
-
-* Fri Jan 12 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-27
-- Re-enable skylake support, as we're now defaulting to modesetting in the
-  server.
-
-* Thu Sep 29 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-26
-- Update to latest git master for use with xserver-1.19
-- Rebuild against xserver-1.19
-
-* Wed Jul 20 2016 Bastien Nocera <bnocera@redhat.com> - 2.99.917-25
-- Avoid clobbering output physical size, should fix hidpi on Surface 3
-
-* Tue Jul 12 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-24.20160712
-- Git snapshot du jour, bringing in a bunch of bugfixes
-- Fix dpi issues on Surface 3 (also needs some kernel fixes)
-- Hopefully fix rhbz#1354124
-
-* Thu May 12 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-23.20160512
-- Update to 20160512 snapshot
-- This fixes laptops with switchable graphics hanging after a dpms off of
-  the lcd screen (rhbz#1334581)
-- Fix fd-leak when falling back to mode-setting on skylake, this fixes
-  Xorg exiting with a "drmSetMaster failed" error when not using server
-  managed fds (e.g. using a different login manager then gdm)
-- Fix duplicate binaries in -devel / intel-gpu-tools subpackages (rhbz#1323641)
-
-* Mon Mar 07 2016 Hans de Goede <hdegoede@redhat.com> - 2.99.917-22.20160119
-- xorg-x11-drv-intel hardly has any accel on skylake and newer, so make
-  Xorg fallback to modesetting + glamor by returning FALSE from probe
-- Using glamor also gives us proper Xvideo support on skylake (rhbz#1305369)
-
-* Fri Feb 05 2016 Fedora Release Engineering <releng@fedoraproject.org> - 2.99.917-21.20160119
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_24_Mass_Rebuild
-
-* Tue Jan 19 2016 Kevin Fenzi <kevin@scrye.com> - 2.99.917-20-20160119
-- Update to 20160119 snapshot
-
-* Sun Dec 06 2015 Adel Gadllah <adel.gadllah@gmail.com> - 2.99.917-19.20151109
-- Update to 20151206 snapshot
-
-* Tue Nov 17 2015 Adel Gadllah <adel.gadllah@gmail.com> - 2.99.917-18.20151109
-- Reenable DRI3 - we ship xserver 1.18 now
-
-* Mon Nov 09 2015 Kevin Fenzi <kevin@scrye.com> - 2.99.917-17.20151109
-- Update to 20151109 snapshot
-
-* Wed Sep 16 2015 Dave Airlie <airlied@redhat.com> - 2.99.917-16.20150729
-- 1.18 ABI rebuild
-
-* Wed Jul 29 2015 Dave Airlie <airlied@redhat.com> 2.99.917-15.20150729
-- update to upstream git snapshot for ABI
-
-* Wed Jul 29 2015 Dave Airlie <airlied@redhat.com> - 2.99.917-14.20150615
-- 1.15 ABI rebuild
-
-* Fri Jun 19 2015 Fedora Release Engineering <rel-eng@lists.fedoraproject.org> - 2.99.917-13.20150615
-- Rebuilt for https://fedoraproject.org/wiki/Fedora_23_Mass_Rebuild
-
-* Mon Jun 15 2015 Dave Airlie <airlied@redhat.com> 2.99.917-12
-- you guessed it, git snap of the day
-- this should bring some PRIME corruption fixes.
-
-* Wed Jun 03 2015 Adam Jackson <ajax@redhat.com> 2.99.917-11
-- Today's git snap
-
-* Tue May 26 2015 Dave Airlie <airlied@redhat.com> 2.99.917-10
-- update git snap
-- fixes uninitialised properties crash
-
-* Wed May 20 2015 Adam Jackson <ajax@redhat.com> 2.99.917-9
-- Today's git snap
-- Don't force the default to DRI3, use upstream's preference
-- Fix build failure due to GCC PR65873
-
-* Mon Mar 02 2015 Dave Airlie <airlied@redhat.com> 2.99.917-8
-- this time for sure, now less hardended.
-
-* Mon Mar 02 2015 Dave Airlie <airlied@redhat.com> 2.99.917-7
-- remove cement, X.org drivers aren't hard enough.
+* Tue May 26 2015 Dave Airlie <airlied@redhat.com> 2.99.917-7
+- update with newer snapshot - fix some problems, use upstream DRI default
 
 * Thu Feb 26 2015 Hans de Goede <hdegoede@redhat.com> - 2.99.917-6
 - Really really build intel-virtual-output (rhbz#1195962)

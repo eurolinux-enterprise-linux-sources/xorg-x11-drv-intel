@@ -207,19 +207,6 @@ static const uint32_t ps_kernel_planar[][4] = {
 #include "exa_wm_write.g7b"
 };
 
-static const uint32_t ps_kernel_nv12[][4] = {
-#include "exa_wm_src_affine.g7b"
-#include "exa_wm_src_sample_nv12.g7b"
-#include "exa_wm_yuv_rgb.g7b"
-#include "exa_wm_write.g7b"
-};
-
-static const uint32_t ps_kernel_rgb[][4] = {
-#include "exa_wm_src_affine.g7b"
-#include "exa_wm_src_sample_argb.g7b"
-#include "exa_wm_write.g7b"
-};
-
 #define KERNEL(kernel_enum, kernel, num_surfaces) \
     [GEN7_WM_KERNEL_##kernel_enum] = {#kernel_enum, kernel, sizeof(kernel), num_surfaces}
 #define NOKERNEL(kernel_enum, func, num_surfaces) \
@@ -229,7 +216,7 @@ static const struct wm_kernel_info {
 	const void *data;
 	unsigned int size;
 	int num_surfaces;
-} wm_kernels[GEN7_WM_KERNEL_COUNT] = {
+} wm_kernels[] = {
 	NOKERNEL(NOMASK, brw_wm_kernel__affine, 2),
 	NOKERNEL(NOMASK_P, brw_wm_kernel__projective, 2),
 
@@ -246,9 +233,7 @@ static const struct wm_kernel_info {
 	NOKERNEL(OPACITY_P, brw_wm_kernel__projective_opacity, 2),
 
 	KERNEL(VIDEO_PLANAR, ps_kernel_planar, 7),
-	KERNEL(VIDEO_NV12, ps_kernel_nv12, 7),
 	KERNEL(VIDEO_PACKED, ps_kernel_packed, 2),
-	KERNEL(VIDEO_RGB, ps_kernel_rgb, 2),
 };
 #undef KERNEL
 
@@ -369,7 +354,7 @@ static uint32_t gen7_get_card_format(PictFormat format)
 		return GEN7_SURFACEFORMAT_R8G8B8A8_UNORM;
 	case PICT_x8b8g8r8:
 		return GEN7_SURFACEFORMAT_R8G8B8X8_UNORM;
-#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
+#ifdef PICT_a2r10g10b10
 	case PICT_a2r10g10b10:
 		return GEN7_SURFACEFORMAT_B10G10R10A2_UNORM;
 	case PICT_x2r10g10b10:
@@ -399,7 +384,7 @@ static uint32_t gen7_get_dest_format(PictFormat format)
 	case PICT_a8b8g8r8:
 	case PICT_x8b8g8r8:
 		return GEN7_SURFACEFORMAT_R8G8B8A8_UNORM;
-#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
+#ifdef PICT_a2r10g10b10
 	case PICT_a2r10g10b10:
 	case PICT_x2r10g10b10:
 		return GEN7_SURFACEFORMAT_B10G10R10A2_UNORM;
@@ -1774,7 +1759,7 @@ static void gen7_emit_video_state(struct sna *sna,
 				  const struct sna_composite_op *op)
 {
 	struct sna_video_frame *frame = op->priv;
-	uint32_t src_surf_format[6];
+	uint32_t src_surf_format;
 	uint32_t src_surf_base[6];
 	int src_width[6];
 	int src_height[6];
@@ -1793,29 +1778,22 @@ static void gen7_emit_video_state(struct sna *sna,
 	src_surf_base[5] = frame->UBufOffset;
 
 	if (is_planar_fourcc(frame->id)) {
-		for (n = 0; n < 2; n++) {
-			src_surf_format[n] = GEN7_SURFACEFORMAT_R8_UNORM;
-			src_width[n]  = frame->width;
-			src_height[n] = frame->height;
-			src_pitch[n]  = frame->pitch[1];
-		}
-		for (; n < 6; n++) {
-			if (is_nv12_fourcc(frame->id))
-				src_surf_format[n] = GEN7_SURFACEFORMAT_R8G8_UNORM;
-			else
-				src_surf_format[n] = GEN7_SURFACEFORMAT_R8_UNORM;
-			src_width[n] = frame->width / 2;
-			src_height[n] = frame->height / 2;
-			src_pitch[n] = frame->pitch[0];
-		}
+		src_surf_format = GEN7_SURFACEFORMAT_R8_UNORM;
+		src_width[1]  = src_width[0]  = frame->width;
+		src_height[1] = src_height[0] = frame->height;
+		src_pitch[1]  = src_pitch[0]  = frame->pitch[1];
+		src_width[4]  = src_width[5]  = src_width[2]  = src_width[3] =
+			frame->width / 2;
+		src_height[4] = src_height[5] = src_height[2] = src_height[3] =
+			frame->height / 2;
+		src_pitch[4]  = src_pitch[5]  = src_pitch[2]  = src_pitch[3] =
+			frame->pitch[0];
 		n_src = 6;
 	} else {
-		if (frame->id == FOURCC_RGB888)
-			src_surf_format[0] = GEN7_SURFACEFORMAT_B8G8R8X8_UNORM;
-		else if (frame->id == FOURCC_UYVY)
-			src_surf_format[0] = GEN7_SURFACEFORMAT_YCRCB_SWAPY;
+		if (frame->id == FOURCC_UYVY)
+			src_surf_format = GEN7_SURFACEFORMAT_YCRCB_SWAPY;
 		else
-			src_surf_format[0] = GEN7_SURFACEFORMAT_YCRCB_NORMAL;
+			src_surf_format = GEN7_SURFACEFORMAT_YCRCB_NORMAL;
 
 		src_width[0]  = frame->width;
 		src_height[0] = frame->height;
@@ -1840,30 +1818,10 @@ static void gen7_emit_video_state(struct sna *sna,
 					       src_width[n],
 					       src_height[n],
 					       src_pitch[n],
-					       src_surf_format[n]);
+					       src_surf_format);
 	}
 
 	gen7_emit_state(sna, op, offset | dirty);
-}
-
-static unsigned select_video_kernel(const struct sna_video_frame *frame)
-{
-	switch (frame->id) {
-	case FOURCC_YV12:
-	case FOURCC_I420:
-	case FOURCC_XVMC:
-		return GEN7_WM_KERNEL_VIDEO_PLANAR;
-
-	case FOURCC_NV12:
-		return GEN7_WM_KERNEL_VIDEO_NV12;
-
-	case FOURCC_RGB888:
-	case FOURCC_RGB565:
-		return GEN7_WM_KERNEL_VIDEO_RGB;
-
-	default:
-		return GEN7_WM_KERNEL_VIDEO_PACKED;
-	}
 }
 
 static bool
@@ -1881,9 +1839,9 @@ gen7_render_video(struct sna *sna,
 	int src_height = frame->src.y2 - frame->src.y1;
 	float src_offset_x, src_offset_y;
 	float src_scale_x, src_scale_y;
+	int nbox, pix_xoff, pix_yoff;
 	unsigned filter;
 	const BoxRec *box;
-	int nbox;
 
 	DBG(("%s: src=(%d, %d), dst=(%d, %d), %dx[(%d, %d), (%d, %d)...]\n",
 	     __FUNCTION__,
@@ -1918,7 +1876,9 @@ gen7_render_video(struct sna *sna,
 		GEN7_SET_FLAGS(SAMPLER_OFFSET(filter, SAMPLER_EXTEND_PAD,
 					      SAMPLER_FILTER_NEAREST, SAMPLER_EXTEND_NONE),
 			       NO_BLEND,
-			       select_video_kernel(frame),
+			       is_planar_fourcc(frame->id) ?
+			       GEN7_WM_KERNEL_VIDEO_PLANAR :
+			       GEN7_WM_KERNEL_VIDEO_PACKED,
 			       2);
 	tmp.priv = frame;
 
@@ -1933,6 +1893,17 @@ gen7_render_video(struct sna *sna,
 
 	gen7_align_vertex(sna, &tmp);
 	gen7_emit_video_state(sna, &tmp);
+
+	/* Set up the offset for translating from the given region (in screen
+	 * coordinates) to the backing pixmap.
+	 */
+#ifdef COMPOSITE
+	pix_xoff = -pixmap->screen_x + pixmap->drawable.x;
+	pix_yoff = -pixmap->screen_y + pixmap->drawable.y;
+#else
+	pix_xoff = 0;
+	pix_yoff = 0;
+#endif
 
 	DBG(("%s: src=(%d, %d)x(%d, %d); frame=(%dx%d), dst=(%dx%d)\n",
 	     __FUNCTION__,
@@ -1955,36 +1926,45 @@ gen7_render_video(struct sna *sna,
 	box = region_rects(dstRegion);
 	nbox = region_num_rects(dstRegion);
 	while (nbox--) {
-		DBG(("%s: dst=(%d, %d), (%d, %d); src=(%f, %f), (%f, %f)\n",
+		BoxRec r;
+
+		DBG(("%s: dst=(%d, %d), (%d, %d) + (%d, %d); src=(%f, %f), (%f, %f)\n",
 		     __FUNCTION__,
 		     box->x1, box->y1,
 		     box->x2, box->y2,
+		     pix_xoff, pix_yoff,
 		     box->x1 * src_scale_x + src_offset_x,
 		     box->y1 * src_scale_y + src_offset_y,
 		     box->x2 * src_scale_x + src_offset_x,
 		     box->y2 * src_scale_y + src_offset_y));
 
+		r.x1 = box->x1 + pix_xoff;
+		r.x2 = box->x2 + pix_xoff;
+		r.y1 = box->y1 + pix_yoff;
+		r.y2 = box->y2 + pix_yoff;
+
 		gen7_get_rectangles(sna, &tmp, 1, gen7_emit_video_state);
 
-		OUT_VERTEX(box->x2, box->y2);
+		OUT_VERTEX(r.x2, r.y2);
 		OUT_VERTEX_F(box->x2 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(box->x1, box->y2);
+		OUT_VERTEX(r.x1, r.y2);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(box->x1, box->y1);
+		OUT_VERTEX(r.x1, r.y1);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y1 * src_scale_y + src_offset_y);
 
+		if (!DAMAGE_IS_ALL(priv->gpu_damage)) {
+			sna_damage_add_box(&priv->gpu_damage, &r);
+			sna_damage_subtract_box(&priv->cpu_damage, &r);
+		}
 		box++;
 	}
+
 	gen4_vertex_flush(sna);
-
-	if (!DAMAGE_IS_ALL(priv->gpu_damage))
-		sna_damage_add(&priv->gpu_damage, dstRegion);
-
 	return true;
 }
 
@@ -2166,9 +2146,7 @@ gen7_composite_set_target(struct sna *sna,
 	} else
 		sna_render_picture_extents(dst, &box);
 
-	hint = PREFER_GPU | RENDER_GPU;
-	if (!need_tiling(sna, op->dst.width, op->dst.height))
-		hint |= FORCE_GPU;
+	hint = PREFER_GPU | FORCE_GPU | RENDER_GPU;
 	if (!partial) {
 		hint |= IGNORE_DAMAGE;
 		if (w == op->dst.width && h == op->dst.height)
@@ -3024,7 +3002,8 @@ fallback_blt:
 		assert(src->depth == dst->depth);
 		assert(src->width == dst->width);
 		assert(src->height == dst->height);
-		return sna_render_copy_boxes__overlap(sna, alu, dst, dst_bo,
+		return sna_render_copy_boxes__overlap(sna, alu,
+						      src, src_bo,
 						      src_dx, src_dy,
 						      dst_dx, dst_dy,
 						      box, n, &extents);

@@ -107,8 +107,6 @@ libsna_la_SOURCES = \
 	gen8_render.h \
 	gen8_vertex.c \
 	gen8_vertex.h \
-	gen9_render.c \
-	gen9_render.h \
 	xassert.h \
 	$(NULL)
 

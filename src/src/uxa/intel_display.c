@@ -192,7 +192,7 @@ intel_output_backlight_init(xf86OutputPtr output)
 
 	str = xf86GetOptValString(intel->Options, OPTION_BACKLIGHT);
 	if (str != NULL) {
-		if (backlight_exists(str)) {
+		if (backlight_exists(str) != BL_NONE) {
 			intel_output->backlight_active_level =
 				backlight_open(&intel_output->backlight,
 					       strdup(str));
@@ -688,11 +688,9 @@ intel_set_scanout_pixmap(xf86CrtcPtr crtc, PixmapPtr ppix)
 	}
 
 	bo = intel_get_pixmap_bo(ppix);
-	if (!bo)
-		return FALSE;
-
-	if (intel->front_buffer)
-		return FALSE;
+	if (intel->front_buffer) {
+		ErrorF("have front buffer\n");
+	}
 
 	drm_intel_bo_disable_reuse(bo);
 
@@ -2089,7 +2087,6 @@ intel_pageflip_abort(ScrnInfoPtr scrn, xf86CrtcPtr crtc, void *data)
 /*
  * Check for pending DRM events and process them.
  */
-#if !HAVE_NOTIFY_FD
 static void
 drm_wakeup_handler(pointer data, int err, pointer p)
 {
@@ -2104,14 +2101,6 @@ drm_wakeup_handler(pointer data, int err, pointer p)
 	if (FD_ISSET(mode->fd, read_mask))
 		drmHandleEvent(mode->fd, &mode->event_context);
 }
-#else
-static void
-drm_notify_fd(int fd, int ready, void *data)
-{
-	struct intel_mode *mode = data;
-	drmHandleEvent(mode->fd, &mode->event_context);
-}
-#endif
 
 /*
  * If there are any available, read drm_events
@@ -2272,11 +2261,9 @@ intel_mode_init(struct intel_screen_private *intel)
 	 * registration within ScreenInit and not PreInit.
 	 */
 	mode->flip_count = 0;
-	SetNotifyFd(mode->fd, drm_notify_fd, X_NOTIFY_READ, mode);
-#if !HAVE_NOTIFY_FD
+	AddGeneralSocket(mode->fd);
 	RegisterBlockAndWakeupHandlers((BlockHandlerProcPtr)NoopDDA,
 				       drm_wakeup_handler, mode);
-#endif
 }
 
 void
@@ -2300,11 +2287,9 @@ intel_mode_close(intel_screen_private *intel)
 
         intel_drm_abort_scrn(intel->scrn);
 
-#if !HAVE_NOTIFY_FD
 	RemoveBlockAndWakeupHandlers((BlockHandlerProcPtr)NoopDDA,
 				     drm_wakeup_handler, mode);
-#endif
-	RemoveNotifyFd(mode->fd);
+	RemoveGeneralSocket(mode->fd);
 }
 
 void

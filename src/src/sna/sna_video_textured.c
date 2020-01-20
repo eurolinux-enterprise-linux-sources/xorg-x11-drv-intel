@@ -48,24 +48,10 @@ static const XvAttributeRec Attributes[] = {
 	//{XvSettable | XvGettable, 0, 255, (char *)"XV_CONTRAST"},
 };
 
-static const XvImageRec gen2_Images[] = {
-	XVIMAGE_YUY2,
-	XVIMAGE_UYVY,
-};
-
-static const XvImageRec gen3_Images[] = {
+static const XvImageRec Images[] = {
 	XVIMAGE_YUY2,
 	XVIMAGE_YV12,
 	XVIMAGE_I420,
-	XVIMAGE_UYVY,
-	XVMC_YUV,
-};
-
-static const XvImageRec gen4_Images[] = {
-	XVIMAGE_YUY2,
-	XVIMAGE_YV12,
-	XVIMAGE_I420,
-	XVIMAGE_NV12,
 	XVIMAGE_UYVY,
 	XVMC_YUV,
 };
@@ -163,16 +149,18 @@ sna_video_textured_put_image(ddPutImage_ARGS)
 	BoxRec dstBox;
 	RegionRec clip;
 	xf86CrtcPtr crtc;
-	int16_t dx, dy;
 	bool flush = false;
 	bool ret;
 
 	if (wedged(sna))
 		return BadAlloc;
 
-	init_video_region(&clip, draw, drw_x, drw_y, drw_w, drw_h);
+	clip.extents.x1 = draw->x + drw_x;
+	clip.extents.y1 = draw->y + drw_y;
+	clip.extents.x2 = clip.extents.x1 + drw_w;
+	clip.extents.y2 = clip.extents.y1 + drw_h;
+	clip.data = NULL;
 
-	ValidateGC(draw, gc);
 	RegionIntersect(&clip, &clip, gc->pCompositeClip);
 	if (!RegionNotEmpty(&clip))
 		return Success;
@@ -195,9 +183,6 @@ sna_video_textured_put_image(ddPutImage_ARGS)
 				   src_w, src_h, drw_w, drw_h,
 				   &clip))
 		return Success;
-
-	if (get_drawable_deltas(draw, pixmap, &dx, &dy))
-		RegionTranslate(&clip, dx, dy);
 
 	flags = MOVE_WRITE | __MOVE_FORCE;
 	if (clip.data)
@@ -252,7 +237,7 @@ sna_video_textured_put_image(ddPutImage_ARGS)
 		DBG(("%s: failed to render video\n", __FUNCTION__));
 		ret = BadAlloc;
 	} else
-		DamageDamageRegion(&pixmap->drawable, &clip);
+		DamageDamageRegion(draw, &clip);
 
 	kgem_bo_destroy(&sna->kgem, frame.bo);
 
@@ -305,20 +290,6 @@ sna_video_textured_query(ddQueryImageAttributes_ARGS)
 		size += tmp;
 		if (offsets)
 			offsets[2] = size;
-		size += tmp;
-		break;
-	case FOURCC_NV12:
-		*h = (*h + 1) & ~1;
-		size = (*w + 3) & ~3;
-		if (pitches)
-			pitches[0] = size;
-		size *= *h;
-		if (offsets)
-			offsets[1] = size;
-		tmp = (*w + 3) & ~3;
-		if (pitches)
-			pitches[1] = tmp;
-		tmp *= (*h >> 1);
 		size += tmp;
 		break;
 	case FOURCC_UYVY:
@@ -394,16 +365,8 @@ void sna_video_textured_setup(struct sna *sna, ScreenPtr screen)
 						 ARRAY_SIZE(Formats));
 	adaptor->nAttributes = ARRAY_SIZE(Attributes);
 	adaptor->pAttributes = (XvAttributeRec *)Attributes;
-	if (sna->kgem.gen < 030) {
-		adaptor->nImages = ARRAY_SIZE(gen2_Images);
-		adaptor->pImages = (XvImageRec *)gen2_Images;
-	} else if (sna->kgem.gen < 040) {
-		adaptor->nImages = ARRAY_SIZE(gen3_Images);
-		adaptor->pImages = (XvImageRec *)gen3_Images;
-	} else {
-		adaptor->nImages = ARRAY_SIZE(gen4_Images);
-		adaptor->pImages = (XvImageRec *)gen4_Images;
-	}
+	adaptor->nImages = ARRAY_SIZE(Images);
+	adaptor->pImages = (XvImageRec *)Images;
 #if XORG_XV_VERSION < 2
 	adaptor->ddAllocatePort = sna_xv_alloc_port;
 	adaptor->ddFreePort = sna_xv_free_port;

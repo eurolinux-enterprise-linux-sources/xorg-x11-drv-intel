@@ -1204,14 +1204,12 @@ static inline void _sna_blt_maybe_clear(const struct sna_composite_op *op, const
 		struct sna_pixmap *priv = sna_pixmap(op->dst.pixmap);
 		if (op->dst.bo == priv->gpu_bo) {
 			sna_damage_all(&priv->gpu_damage, op->dst.pixmap);
-			sna_damage_destroy(&priv->cpu_damage);
 			priv->clear = true;
 			priv->clear_color = op->u.blt.pixel;
 			DBG(("%s: pixmap=%ld marking clear [%08x]\n",
 			     __FUNCTION__,
 			     op->dst.pixmap->drawable.serialNumber,
 			     op->u.blt.pixel));
-			((struct sna_composite_op *)op)->damage = NULL;
 		}
 	}
 }
@@ -2600,7 +2598,6 @@ sna_blt_composite(struct sna *sna,
 clear:
 		if (was_clear && sna_pixmap(tmp->dst.pixmap)->clear_color == 0) {
 			sna_pixmap(tmp->dst.pixmap)->clear = true;
-nop:
 			return prepare_blt_nop(sna, tmp);
 		}
 
@@ -2616,7 +2613,6 @@ nop:
 		}
 		tmp->dst.bo = sna_drawable_use_bo(dst->pDrawable, hint,
 						  &dst_box, &tmp->damage);
-		assert(!tmp->damage || !DAMAGE_IS_ALL(*tmp->damage));
 		if (tmp->dst.bo) {
 			if (!kgem_bo_can_blt(&sna->kgem, tmp->dst.bo)) {
 				DBG(("%s: can not blit to dst, tiling? %d, pitch? %d\n",
@@ -2650,40 +2646,28 @@ nop:
 		}
 		if (op == PictOpOver && is_opaque_solid(src))
 			op = PictOpSrc;
-		if (op == PictOpAdd &&
-		    PICT_FORMAT_RGB(src->format) == PICT_FORMAT_RGB(dst->format) &&
-		    is_white(src))
+		if (op == PictOpAdd && is_white(src))
 			op = PictOpSrc;
 		if (was_clear && (op == PictOpAdd || op == PictOpOver)) {
 			if (sna_pixmap(tmp->dst.pixmap)->clear_color == 0)
 				op = PictOpSrc;
 			if (op == PictOpOver) {
-				unsigned dst_color = solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color);
 				color = over(get_solid_color(src, PICT_a8r8g8b8),
-					     dst_color);
+					     solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color));
 				op = PictOpSrc;
 				DBG(("%s: precomputing solid OVER (%08x, %08x) -> %08x\n",
 				     __FUNCTION__, get_solid_color(src, PICT_a8r8g8b8),
 				     solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color),
 				     color));
-				if (color == dst_color)
-					goto nop;
-				else
-					goto fill;
 			}
 			if (op == PictOpAdd) {
-				unsigned dst_color = solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color);
 				color = add(get_solid_color(src, PICT_a8r8g8b8),
-					    dst_color);
+					    solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color));
 				op = PictOpSrc;
 				DBG(("%s: precomputing solid ADD (%08x, %08x) -> %08x\n",
 				     __FUNCTION__, get_solid_color(src, PICT_a8r8g8b8),
 				     solid_color(dst->format, sna_pixmap(tmp->dst.pixmap)->clear_color),
 				     color));
-				if (color == dst_color)
-					goto nop;
-				else
-					goto fill;
 			}
 		}
 		if (op == PictOpOutReverse && is_opaque_solid(src))
@@ -2717,7 +2701,6 @@ fill:
 		}
 		tmp->dst.bo = sna_drawable_use_bo(dst->pDrawable, hint,
 						  &dst_box, &tmp->damage);
-		assert(!tmp->damage || !DAMAGE_IS_ALL(*tmp->damage));
 		if (tmp->dst.bo) {
 			if (!kgem_bo_can_blt(&sna->kgem, tmp->dst.bo)) {
 				DBG(("%s: can not blit to dst, tiling? %d, pitch? %d\n",
@@ -2888,7 +2871,6 @@ fill:
 	}
 	tmp->dst.bo = sna_drawable_use_bo(dst->pDrawable, hint,
 					  &dst_box, &tmp->damage);
-	assert(!tmp->damage || !DAMAGE_IS_ALL(*tmp->damage));
 
 	if (tmp->dst.bo && hint & REPLACES) {
 		struct sna_pixmap *priv = sna_pixmap(tmp->dst.pixmap);

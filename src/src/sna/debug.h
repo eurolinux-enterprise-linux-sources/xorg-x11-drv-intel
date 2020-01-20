@@ -32,13 +32,13 @@
 void LogF(const char *f, ...);
 #define DBG(x) LogF x
 #else
-#define DBG(x) do {} while (0)
+#define DBG(x)
 #endif
 
 #if HAS_DEBUG_FULL || !defined(NDEBUG)
 #define ERR(x) ErrorF x
 #else
-#define ERR(x) do {} while (0)
+#define ERR(x)
 #endif
 
 #endif /* _SNA_DEBUG_H_ */

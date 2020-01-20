@@ -31,7 +31,6 @@
 
 #include <X11/Xlibint.h>
 #include <X11/extensions/record.h>
-#include <X11/extensions/scrnsaver.h>
 #include <X11/extensions/XShm.h>
 #if HAVE_X11_EXTENSIONS_SHMPROTO_H
 #include <X11/extensions/shmproto.h>
@@ -80,15 +79,13 @@ static int verbose;
 #define DRAW 0x8
 #define DAMAGE 0x10
 #define CURSOR 0x20
-#define SCREEN 0x40
-#define POLL 0x80
+#define POLL 0x40
 
 struct display {
 	Display *dpy;
 	struct clone *clone;
 	struct context *ctx;
 
-	int saver_event, saver_error, saver_active;
 	int damage_event, damage_error;
 	int xfixes_event, xfixes_error;
 	int rr_event, rr_error, rr_active;
@@ -101,7 +98,6 @@ struct display {
 	int width;
 	int height;
 	int depth;
-	int active;
 
 	XRenderPictFormat *root_format;
 	XRenderPictFormat *rgb16_format;
@@ -127,13 +123,6 @@ struct display {
 	int send;
 	int skip_clone;
 	int skip_frame;
-
-	struct {
-		int timeout;
-		int interval;
-		int prefer_blank;
-		int allow_exp;
-	} saver;
 };
 
 struct output {
@@ -977,35 +966,6 @@ out:
 	return rr_output;
 }
 
-static int check_virtual(struct display *display)
-{
-	XRRScreenResources *res;
-	int found = -ENOENT;
-	int i;
-
-	res = _XRRGetScreenResourcesCurrent(display->dpy, display->root);
-	if (res == NULL)
-		return -ENOMEM;
-
-	for (i = 0; found == -ENOENT && i < res->noutput; i++) {
-		XRROutputInfo *output;
-
-		output = XRRGetOutputInfo(display->dpy, res, res->outputs[i]);
-		if (output == NULL)
-			continue;
-
-		if (strcmp(output->name, "VIRTUAL1") == 0)
-			found = 0;
-
-		XRRFreeOutputInfo(output);
-	}
-	XRRFreeScreenResources(res);
-
-	DBG(XRR, ("%s(%s): has VIRTUAL1? %d\n",
-		  __func__, DisplayString(display->dpy), found));
-	return found;
-}
-
 static int stride_for_depth(int width, int depth)
 {
 	if (depth == 24)
@@ -1287,56 +1247,6 @@ static void clone_update(struct clone *clone)
 
 	clone_update_modes__randr(clone);
 	clone->rr_update = 0;
-}
-
-static void screensaver_save(struct display *display)
-{
-	display->saver_active =
-		XScreenSaverQueryExtension(display->dpy,
-					   &display->saver_event,
-					   &display->saver_error);
-	DBG(SCREEN,
-	    ("%s screen saver active? %d [event=%d, error=%d]\n",
-	     DisplayString(display->dpy),
-	     display->saver_active,
-	     display->saver_event,
-	     display->saver_error));
-
-	XGetScreenSaver(display->dpy,
-			&display->saver.timeout,
-			&display->saver.interval,
-			&display->saver.prefer_blank,
-			&display->saver.allow_exp);
-
-	DBG(SCREEN,
-	    ("%s saving screen saver defaults: timeout=%d interval=%d prefer_blank=%d allow_exp=%d\n",
-	     DisplayString(display->dpy),
-	     display->saver.timeout,
-	     display->saver.interval,
-	     display->saver.prefer_blank,
-	     display->saver.allow_exp));
-}
-
-static void screensaver_disable(struct display *display)
-{
-	DBG(SCREEN,
-	    ("%s disabling screen saver\n", DisplayString(display->dpy)));
-
-	XSetScreenSaver(display->dpy, 0, 0, DefaultBlanking, DefaultExposures);
-	display_mark_flush(display);
-}
-
-static void screensaver_restore(struct display *display)
-{
-	DBG(SCREEN,
-	    ("%s restoring screen saver\n", DisplayString(display->dpy)));
-
-	XSetScreenSaver(display->dpy,
-			display->saver.timeout,
-			display->saver.interval,
-			display->saver.prefer_blank,
-			display->saver.allow_exp);
-	display_mark_flush(display);
 }
 
 static int context_update(struct context *ctx)
@@ -1695,13 +1605,6 @@ ungrab:
 		XUngrabServer(display->dpy);
 	}
 
-	for (n = 1; n < ctx->ndisplay; n++) {
-		struct display *display = &ctx->display[n];
-
-		display->active = 0;
-		screensaver_restore(display);
-	}
-
 	ctx->active = NULL;
 	for (n = 0; n < ctx->nclone; n++) {
 		struct clone *clone = &ctx->clones[n];
@@ -1712,10 +1615,7 @@ ungrab:
 			continue;
 
 		DBG(XRR, ("%s-%s: added to active list\n",
-			  DisplayString(clone->dst.display->dpy), clone->dst.name));
-
-		if (clone->dst.display->active++ == 0)
-			screensaver_disable(clone->dst.display);
+		     DisplayString(clone->dst.display->dpy), clone->dst.name));
 
 		clone->active = ctx->active;
 		ctx->active = clone;
@@ -2137,9 +2037,8 @@ static void clone_damage(struct clone *c, const XRectangle *rec)
 	if ((v = (int)rec->y + rec->height) > c->damaged.y2)
 		c->damaged.y2 = v;
 
-	DBG(DAMAGE, ("%s-%s damaged: +(%d,%d)x(%d, %d) -> (%d, %d), (%d, %d)\n",
+	DBG(DAMAGE, ("%s-%s damaged: (%d, %d), (%d, %d)\n",
 	     DisplayString(c->dst.display->dpy), c->dst.name,
-	     rec->x, rec->y, rec->width, rec->height,
 	     c->damaged.x1, c->damaged.y1,
 	     c->damaged.x2, c->damaged.y2));
 }
@@ -2483,8 +2382,6 @@ static int add_display(struct context *ctx, Display *dpy)
 	display->depth = DefaultDepth(dpy, DefaultScreen(dpy));
 	display->visual = DefaultVisual(dpy, DefaultScreen(dpy));
 
-	XSelectInput(dpy, display->root, ExposureMask);
-
 	display->has_shm = can_use_shm(dpy, display->root,
 				       &display->shm_event,
 				       &display->shm_opcode,
@@ -2495,8 +2392,6 @@ static int add_display(struct context *ctx, Display *dpy)
 	     display->shm_event,
 	     display->shm_opcode,
 	     display->has_shm_pixmap));
-
-	screensaver_save(display);
 
 	display->rr_active = XRRQueryExtension(dpy, &display->rr_event, &display->rr_error);
 	DBG(X11, ("%s: randr_active?=%d, event=%d, error=%d\n",
@@ -3392,7 +3287,6 @@ int main(int argc, char **argv)
 	uint64_t count;
 	int daemonize = 1, bumblebee = 0, siblings = 0, singleton = 1;
 	int i, ret, open, fail;
-	int idle;
 
 	signal(SIGPIPE, SIG_IGN);
 
@@ -3449,13 +3343,6 @@ int main(int argc, char **argv)
 		goto out;
 	}
 
-	ret = check_virtual(ctx.display);
-	if (ret) {
-		fprintf(stderr, "No VIRTUAL outputs on \"%s\".\n",
-			DisplayString(ctx.display->dpy));
-		goto out;
-	}
-
 	if (singleton) {
 		XSelectInput(ctx.display->dpy, ctx.display->root, PropertyChangeMask);
 		if (first_display_has_singleton(&ctx)) {
@@ -3509,11 +3396,6 @@ int main(int argc, char **argv)
 	ret = display_init_damage(ctx.display);
 	if (ret)
 		goto out;
-
-	if (ctx.display->saver_active)
-		XScreenSaverSelectInput(ctx.display->dpy,
-					ctx.display->root,
-					ScreenSaverNotifyMask);
 
 	if ((ctx.display->rr_event | ctx.display->rr_error) == 0) {
 		fprintf(stderr, "RandR extension not supported by %s\n", DisplayString(ctx.display->dpy));
@@ -3573,59 +3455,25 @@ int main(int argc, char **argv)
 
 	ctx.command_continuation = 0;
 	update_cursor_image(&ctx);
-
-	idle = 0;
 	while (!done) {
 		XEvent e;
 		int reconfigure = 0;
 		int rr_update = 0;
 
-		if (idle) {
-			DBG(POLL, ("polling - enable timer? %d, nfd=%d, ndisplay=%d\n", ctx.timer_active, ctx.nfd, ctx.ndisplay));
-			ret = poll(ctx.pfd + !ctx.timer_active, ctx.nfd - !ctx.timer_active, -1);
-			if (ret <= 0)
-				break;
-
-			DBG(POLL, ("poll reports %d fd awake\n", ret));
-		}
-		idle = 1;
+		DBG(POLL, ("polling - enable timer? %d, nfd=%d, ndisplay=%d\n", ctx.timer_active, ctx.nfd, ctx.ndisplay));
+		ret = poll(ctx.pfd + !ctx.timer_active, ctx.nfd - !ctx.timer_active, -1);
+		if (ret <= 0)
+			break;
 
 		/* pfd[0] is the timer, pfd[1] is the local display, pfd[2] is the mouse, pfd[3+] are the remotes */
 
+		DBG(POLL, ("poll reports %d fd awake\n", ret));
 		if (ctx.pfd[1].revents || XPending(ctx.display[0].dpy)) {
 			DBG(POLL,("%s woken up\n", DisplayString(ctx.display[0].dpy)));
-			ctx.pfd[1].revents = 0;
-			idle = 0;
-
 			do {
 				XNextEvent(ctx.display->dpy, &e);
 
-				DBG(POLL, ("%s received event %d\n", DisplayString(ctx.display[0].dpy), e.type));
-
-				if (e.type == ctx.display->saver_event + ScreenSaverNotify) {
-					const XScreenSaverNotifyEvent *se = (const XScreenSaverNotifyEvent *)&e;
-					DBG(SCREEN,
-					    ("%s screen saver: state=%d, kind=%d, forced=%d\n",
-					     DisplayString(ctx.display->dpy),
-					     se->state, se->kind, se->forced));
-					for (i = 1; i < ctx.ndisplay; i++) {
-						struct display *display = &ctx.display[i];
-
-						if (!display->active)
-							continue;
-
-						DBG(SCREEN,
-						    ("%s %s screen saver\n",
-						     DisplayString(display->dpy),
-						     se->state == ScreenSaverOn ? "activating" : "resetting\n"));
-
-						if (se->state == ScreenSaverOn)
-							XActivateScreenSaver(display->dpy);
-						else
-							XResetScreenSaver(display->dpy);
-						XFlush(display->dpy);
-					}
-				} else if (e.type == ctx.display->damage_event + XDamageNotify) {
+				if (e.type == ctx.display->damage_event + XDamageNotify ) {
 					const XDamageNotifyEvent *de = (const XDamageNotifyEvent *)&e;
 					struct clone *clone;
 
@@ -3673,41 +3521,13 @@ int main(int argc, char **argv)
 			if (ctx.pfd[i+2].revents == 0 && !XPending(ctx.display[i].dpy))
 				continue;
 
-			ctx.pfd[i+2].revents = 0;
-			idle = 0;
-
 			DBG(POLL, ("%s woken up\n", DisplayString(ctx.display[i].dpy)));
 			do {
 				XNextEvent(ctx.display[i].dpy, &e);
 
 				DBG(POLL, ("%s received event %d\n", DisplayString(ctx.display[i].dpy), e.type));
-				if (e.type == Expose) {
-					const XExposeEvent *xe = (XExposeEvent *)&e;
-					struct clone *clone;
-					int damaged = 0;
-
-					DBG(DAMAGE, ("%s exposed: (%d, %d)x(%d, %d)\n",
-					     DisplayString(ctx.display[i].dpy),
-					     xe->x, xe->y, xe->width, xe->height));
-
-					for (clone = ctx.active; clone; clone = clone->active) {
-						XRectangle r;
-
-						if (clone->dst.display != &ctx.display[i])
-							continue;
-
-						r.x = clone->src.x + xe->x;
-						r.y = clone->src.y + xe->y;
-						r.width  = xe->width;
-						r.height = xe->height;
-						clone_damage(clone, &r);
-						damaged++;
-					}
-
-					if (damaged)
-						context_enable_timer(&ctx);
-				} else if (ctx.display[i].rr_active && e.type == ctx.display[i].rr_event + RRNotify) {
-					const XRRNotifyEvent *re = (XRRNotifyEvent *)&e;
+				if (ctx.display[i].rr_active && e.type == ctx.display[i].rr_event + RRNotify) {
+					XRRNotifyEvent *re = (XRRNotifyEvent *)&e;
 
 					DBG(XRR, ("%s received RRNotify, type %d\n", DisplayString(ctx.display[i].dpy), re->subtype));
 					if (re->subtype == RRNotify_OutputChange) {
@@ -3755,7 +3575,6 @@ int main(int argc, char **argv)
 
 			DBG(TIMER, ("%s timer still active? %d\n", DisplayString(ctx.display->dpy), ret != 0));
 			ctx.timer_active = ret != 0;
-			idle = 0;
 		}
 	}
 

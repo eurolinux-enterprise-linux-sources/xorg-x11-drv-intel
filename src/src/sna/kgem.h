@@ -104,7 +104,7 @@ struct kgem_request {
 	struct list list;
 	struct kgem_bo *bo;
 	struct list buffers;
-	unsigned ring;
+	int ring;
 };
 
 enum {
@@ -112,12 +112,6 @@ enum {
 	MAP_CPU,
 	NUM_MAP_TYPES,
 };
-
-typedef void (*memcpy_box_func)(const void *src, void *dst, int bpp,
-				int32_t src_stride, int32_t dst_stride,
-				int16_t src_x, int16_t src_y,
-				int16_t dst_x, int16_t dst_y,
-				uint16_t width, uint16_t height);
 
 struct kgem {
 	unsigned wedged;
@@ -195,15 +189,12 @@ struct kgem {
 	uint32_t has_no_reloc :1;
 	uint32_t has_handle_lut :1;
 	uint32_t has_wc_mmap :1;
-	uint32_t has_dirtyfb :1;
 
 	uint32_t can_fence :1;
 	uint32_t can_blt_cpu :1;
 	uint32_t can_blt_y :1;
 	uint32_t can_render_y :1;
 	uint32_t can_scanout_y :1;
-
-	uint32_t needs_dirtyfb :1;
 
 	uint16_t fence_max;
 	uint16_t half_cpu_cache_pages;
@@ -218,9 +209,16 @@ struct kgem {
 	void (*retire)(struct kgem *kgem);
 	void (*expire)(struct kgem *kgem);
 
-	memcpy_box_func memcpy_to_tiled_x;
-	memcpy_box_func memcpy_from_tiled_x;
-	memcpy_box_func memcpy_between_tiled_x;
+	void (*memcpy_to_tiled_x)(const void *src, void *dst, int bpp,
+				  int32_t src_stride, int32_t dst_stride,
+				  int16_t src_x, int16_t src_y,
+				  int16_t dst_x, int16_t dst_y,
+				  uint16_t width, uint16_t height);
+	void (*memcpy_from_tiled_x)(const void *src, void *dst, int bpp,
+				    int32_t src_stride, int32_t dst_stride,
+				    int16_t src_x, int16_t src_y,
+				    int16_t dst_x, int16_t dst_y,
+				    uint16_t width, uint16_t height);
 
 	struct kgem_bo *batch_bo;
 
@@ -325,7 +323,6 @@ bool kgem_bo_convert_to_gpu(struct kgem *kgem,
 			    struct kgem_bo *bo,
 			    unsigned flags);
 
-bool kgem_bo_is_fenced(struct kgem *kgem, struct kgem_bo *bo);
 uint32_t kgem_bo_get_binding(struct kgem_bo *bo, uint32_t format);
 void kgem_bo_set_binding(struct kgem_bo *bo, uint32_t format, uint16_t offset);
 
@@ -404,7 +401,6 @@ void _kgem_bo_destroy(struct kgem *kgem, struct kgem_bo *bo);
 static inline void kgem_bo_destroy(struct kgem *kgem, struct kgem_bo *bo)
 {
 	assert(bo->refcnt);
-	assert(bo->refcnt > bo->active_scanout);
 	if (--bo->refcnt == 0)
 		_kgem_bo_destroy(kgem, bo);
 }
@@ -421,7 +417,7 @@ static inline void kgem_set_mode(struct kgem *kgem,
 	kgem_submit(kgem);
 #endif
 
-	if (kgem->nreloc && bo->rq == NULL && kgem_ring_is_idle(kgem, kgem->ring)) {
+	if (kgem->nreloc && bo->exec == NULL && kgem_ring_is_idle(kgem, kgem->ring)) {
 		DBG(("%s: flushing before new bo\n", __FUNCTION__));
 		_kgem_submit(kgem);
 	}
@@ -587,7 +583,7 @@ static inline bool kgem_bo_can_blt(struct kgem *kgem,
 		return false;
 	}
 
-	if (kgem->gen >= 0100 && bo->proxy && bo->delta & 63) {
+	if (kgem->gen >= 0100 && bo->proxy && bo->delta & (1 << 4)) {
 		DBG(("%s: can not blt to handle=%d, delta=%d\n",
 		     __FUNCTION__, bo->handle, bo->delta));
 		return false;
@@ -638,22 +634,15 @@ static inline void kgem_bo_mark_busy(struct kgem *kgem, struct kgem_bo *bo, int 
 	}
 }
 
-static inline void __kgem_bo_clear_dirty(struct kgem_bo *bo)
-{
-	DBG(("%s: handle=%d\n", __FUNCTION__, bo->handle));
-
-	bo->domain = DOMAIN_NONE;
-	bo->needs_flush = false;
-	bo->gtt_dirty = false;
-}
-
 inline static void __kgem_bo_clear_busy(struct kgem_bo *bo)
 {
 	DBG(("%s: handle=%d\n", __FUNCTION__, bo->handle));
 	bo->rq = NULL;
 	list_del(&bo->request);
 
-	__kgem_bo_clear_dirty(bo);
+	bo->domain = DOMAIN_NONE;
+	bo->needs_flush = false;
+	bo->gtt_dirty = false;
 }
 
 static inline bool kgem_bo_is_busy(struct kgem_bo *bo)
@@ -897,6 +886,6 @@ memcpy_from_tiled_x(struct kgem *kgem,
 					 width, height);
 }
 
-void choose_memcpy_tiled_x(struct kgem *kgem, int swizzling, unsigned cpu);
+void choose_memcpy_tiled_x(struct kgem *kgem, int swizzling);
 
 #endif /* KGEM_H */

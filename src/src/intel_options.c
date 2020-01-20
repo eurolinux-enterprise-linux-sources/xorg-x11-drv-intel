@@ -9,17 +9,15 @@
 #include "intel_options.h"
 
 const OptionInfoRec intel_options[] = {
-	{OPTION_ACCEL_ENABLE,	"Accel",	OPTV_BOOLEAN,	{0},	0},
+	{OPTION_ACCEL_DISABLE,	"NoAccel",	OPTV_BOOLEAN,	{0},	0},
 	{OPTION_ACCEL_METHOD,	"AccelMethod",	OPTV_STRING,	{0},	0},
 	{OPTION_BACKLIGHT,	"Backlight",	OPTV_STRING,	{0},	0},
-	{OPTION_EDID,		"CustomEDID",	OPTV_STRING,	{0},	0},
 	{OPTION_DRI,		"DRI",		OPTV_STRING,	{0},	0},
 	{OPTION_PRESENT,	"Present",	OPTV_BOOLEAN,	{0},	1},
 	{OPTION_COLOR_KEY,	"ColorKey",	OPTV_INTEGER,	{0},	0},
 	{OPTION_VIDEO_KEY,	"VideoKey",	OPTV_INTEGER,	{0},	0},
 	{OPTION_TILING_2D,	"Tiling",	OPTV_BOOLEAN,	{0},	1},
 	{OPTION_TILING_FB,	"LinearFramebuffer",	OPTV_BOOLEAN,	{0},	0},
-	{OPTION_ROTATION,	"HWRotation",	OPTV_BOOLEAN,	{0},	1},
 	{OPTION_VSYNC,		"VSync",	OPTV_BOOLEAN,	{0},	1},
 	{OPTION_PAGEFLIP,	"PageFlip",	OPTV_BOOLEAN,	{0},	1},
 	{OPTION_SWAPBUFFERS_WAIT, "SwapbuffersWait", OPTV_BOOLEAN,	{0},	1},

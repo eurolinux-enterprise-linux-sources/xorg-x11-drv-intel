@@ -788,15 +788,6 @@ static bool __upload_inplace(struct kgem *kgem,
 	if (FORCE_INPLACE)
 		return FORCE_INPLACE > 0;
 
-	if (bo->exec)
-		return false;
-
-	if (bo->flush)
-		return true;
-
-	if (kgem_bo_can_map__cpu(kgem, bo, true))
-		return true;
-
 	/* If we are writing through the GTT, check first if we might be
 	 * able to almagamate a series of small writes into a single
 	 * operation.

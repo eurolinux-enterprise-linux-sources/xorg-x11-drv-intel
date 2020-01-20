@@ -267,7 +267,7 @@ int _sna_damage_get_boxes(struct sna_damage *damage, const BoxRec **boxes);
 static inline int
 sna_damage_get_boxes(struct sna_damage *damage, const BoxRec **boxes)
 {
-	assert(DAMAGE_PTR(damage));
+	assert(damage);
 
 	if (DAMAGE_IS_ALL(damage)) {
 		*boxes = &DAMAGE_PTR(damage)->extents;
@@ -322,8 +322,7 @@ static inline void sna_damage_destroy(struct sna_damage **damage)
 	if (*damage == NULL)
 		return;
 
-	if (DAMAGE_PTR(*damage))
-		__sna_damage_destroy(DAMAGE_PTR(*damage));
+	__sna_damage_destroy(DAMAGE_PTR(*damage));
 	*damage = NULL;
 }
 

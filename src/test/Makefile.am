@@ -5,7 +5,6 @@ stress_TESTS = \
 	basic-rectangle \
 	basic-string \
 	basic-copyarea \
-	basic-copyplane \
 	basic-copyarea-size \
 	basic-putimage \
 	basic-lines \
@@ -28,12 +27,6 @@ stress_TESTS = \
 	shm-test \
 	$(NULL)
 
-if X11_VM
-stress_TESTS += \
-	xvidmode \
-	$(NULL)
-endif
-
 if DRI2
 stress_TESTS += \
 	dri2-race \
@@ -46,11 +39,9 @@ endif
 if X11_DRI3
 stress_TESTS += \
 	dri3-test \
-	present-race \
-	present-speed \
 	present-test \
+	present-speed \
 	$(NULL)
-present_speed_CFLAGS = ${AM_CFLAGS} -pthread
 endif
 check_PROGRAMS = $(stress_TESTS)
 

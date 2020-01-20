@@ -105,14 +105,6 @@ static const uint32_t ps_kernel_planar_static[][4] = {
 #include "exa_wm_write.g5b"
 };
 
-static const uint32_t ps_kernel_nv12_static[][4] = {
-#include "exa_wm_xy.g5b"
-#include "exa_wm_src_affine.g5b"
-#include "exa_wm_src_sample_nv12.g5b"
-#include "exa_wm_yuv_rgb.g5b"
-#include "exa_wm_write.g5b"
-};
-
 #define NOKERNEL(kernel_enum, func, masked) \
     [kernel_enum] = {func, 0, masked}
 #define KERNEL(kernel_enum, kernel, masked) \
@@ -138,7 +130,6 @@ static const struct wm_kernel_info {
 	NOKERNEL(WM_KERNEL_OPACITY_P, brw_wm_kernel__projective_opacity, true),
 
 	KERNEL(WM_KERNEL_VIDEO_PLANAR, ps_kernel_planar_static, false),
-	KERNEL(WM_KERNEL_VIDEO_NV12, ps_kernel_nv12_static, false),
 	KERNEL(WM_KERNEL_VIDEO_PACKED, ps_kernel_packed_static, false),
 };
 #undef KERNEL
@@ -294,7 +285,7 @@ static uint32_t gen5_get_card_format(PictFormat format)
 		return GEN5_SURFACEFORMAT_R8G8B8A8_UNORM;
 	case PICT_x8b8g8r8:
 		return GEN5_SURFACEFORMAT_R8G8B8X8_UNORM;
-#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
+#ifdef PICT_a2r10g10b10
 	case PICT_a2r10g10b10:
 		return GEN5_SURFACEFORMAT_B10G10R10A2_UNORM;
 	case PICT_x2r10g10b10:
@@ -324,7 +315,7 @@ static uint32_t gen5_get_dest_format(PictFormat format)
 	case PICT_a8b8g8r8:
 	case PICT_x8b8g8r8:
 		return GEN5_SURFACEFORMAT_R8G8B8A8_UNORM;
-#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
+#ifdef PICT_a2r10g10b10
 	case PICT_a2r10g10b10:
 	case PICT_x2r10g10b10:
 		return GEN5_SURFACEFORMAT_B10G10R10A2_UNORM;
@@ -1287,7 +1278,7 @@ static void gen5_video_bind_surfaces(struct sna *sna,
 {
 	bool dirty = kgem_bo_is_dirty(op->dst.bo);
 	struct sna_video_frame *frame = op->priv;
-	uint32_t src_surf_format[6];
+	uint32_t src_surf_format;
 	uint32_t src_surf_base[6];
 	int src_width[6];
 	int src_height[6];
@@ -1304,27 +1295,22 @@ static void gen5_video_bind_surfaces(struct sna *sna,
 	src_surf_base[5] = frame->UBufOffset;
 
 	if (is_planar_fourcc(frame->id)) {
-		for (n = 0; n < 2; n++) {
-			src_surf_format[n] = GEN5_SURFACEFORMAT_R8_UNORM;
-			src_width[n]  = frame->width;
-			src_height[n] = frame->height;
-			src_pitch[n]  = frame->pitch[1];
-		}
-		for (; n < 6; n++) {
-			if (is_nv12_fourcc(frame->id))
-				src_surf_format[n] = GEN5_SURFACEFORMAT_R8G8_UNORM;
-			else
-				src_surf_format[n] = GEN5_SURFACEFORMAT_R8_UNORM;
-			src_width[n]  = frame->width / 2;
-			src_height[n] = frame->height / 2;
-			src_pitch[n]  = frame->pitch[0];
-		}
+		src_surf_format = GEN5_SURFACEFORMAT_R8_UNORM;
+		src_width[1]  = src_width[0]  = frame->width;
+		src_height[1] = src_height[0] = frame->height;
+		src_pitch[1]  = src_pitch[0]  = frame->pitch[1];
+		src_width[4]  = src_width[5]  = src_width[2]  = src_width[3] =
+			frame->width / 2;
+		src_height[4] = src_height[5] = src_height[2] = src_height[3] =
+			frame->height / 2;
+		src_pitch[4]  = src_pitch[5]  = src_pitch[2]  = src_pitch[3] =
+			frame->pitch[0];
 		n_src = 6;
 	} else {
 		if (frame->id == FOURCC_UYVY)
-			src_surf_format[0] = GEN5_SURFACEFORMAT_YCRCB_SWAPY;
+			src_surf_format = GEN5_SURFACEFORMAT_YCRCB_SWAPY;
 		else
-			src_surf_format[0] = GEN5_SURFACEFORMAT_YCRCB_NORMAL;
+			src_surf_format = GEN5_SURFACEFORMAT_YCRCB_NORMAL;
 
 		src_width[0]  = frame->width;
 		src_height[0] = frame->height;
@@ -1348,7 +1334,7 @@ static void gen5_video_bind_surfaces(struct sna *sna,
 					       src_width[n],
 					       src_height[n],
 					       src_pitch[n],
-					       src_surf_format[n]);
+					       src_surf_format);
 	}
 
 	gen5_emit_state(sna, op, offset | dirty);
@@ -1369,8 +1355,8 @@ gen5_render_video(struct sna *sna,
 	int src_height = frame->src.y2 - frame->src.y1;
 	float src_offset_x, src_offset_y;
 	float src_scale_x, src_scale_y;
+	int nbox, pix_xoff, pix_yoff;
 	const BoxRec *box;
-	int nbox;
 
 	DBG(("%s: %dx%d -> %dx%d\n", __FUNCTION__,
 	     src_width, src_height, dst_width, dst_height));
@@ -1393,7 +1379,6 @@ gen5_render_video(struct sna *sna,
 	tmp.src.bo = frame->bo;
 	tmp.mask.bo = NULL;
 	tmp.u.gen5.wm_kernel =
-		is_nv12_fourcc(frame->id) ? WM_KERNEL_VIDEO_NV12 :
 		is_planar_fourcc(frame->id) ? WM_KERNEL_VIDEO_PLANAR : WM_KERNEL_VIDEO_PACKED;
 	tmp.u.gen5.ve_id = 2;
 	tmp.is_affine = true;
@@ -1410,6 +1395,17 @@ gen5_render_video(struct sna *sna,
 	gen5_align_vertex(sna, &tmp);
 	gen5_video_bind_surfaces(sna, &tmp);
 
+	/* Set up the offset for translating from the given region (in screen
+	 * coordinates) to the backing pixmap.
+	 */
+#ifdef COMPOSITE
+	pix_xoff = -pixmap->screen_x + pixmap->drawable.x;
+	pix_yoff = -pixmap->screen_y + pixmap->drawable.y;
+#else
+	pix_xoff = 0;
+	pix_yoff = 0;
+#endif
+
 	src_scale_x = (float)src_width / dst_width / frame->width;
 	src_offset_x = (float)frame->src.x1 / frame->width - dstRegion->extents.x1 * src_scale_x;
 
@@ -1419,27 +1415,35 @@ gen5_render_video(struct sna *sna,
 	box = region_rects(dstRegion);
 	nbox = region_num_rects(dstRegion);
 	while (nbox--) {
+		BoxRec r;
+
+		r.x1 = box->x1 + pix_xoff;
+		r.x2 = box->x2 + pix_xoff;
+		r.y1 = box->y1 + pix_yoff;
+		r.y2 = box->y2 + pix_yoff;
+
 		gen5_get_rectangles(sna, &tmp, 1, gen5_video_bind_surfaces);
 
-		OUT_VERTEX(box->x2, box->y2);
+		OUT_VERTEX(r.x2, r.y2);
 		OUT_VERTEX_F(box->x2 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(box->x1, box->y2);
+		OUT_VERTEX(r.x1, r.y2);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y2 * src_scale_y + src_offset_y);
 
-		OUT_VERTEX(box->x1, box->y1);
+		OUT_VERTEX(r.x1, r.y1);
 		OUT_VERTEX_F(box->x1 * src_scale_x + src_offset_x);
 		OUT_VERTEX_F(box->y1 * src_scale_y + src_offset_y);
 
+		if (!DAMAGE_IS_ALL(priv->gpu_damage)) {
+			sna_damage_add_box(&priv->gpu_damage, &r);
+			sna_damage_subtract_box(&priv->cpu_damage, &r);
+		}
 		box++;
 	}
+
 	gen4_vertex_flush(sna);
-
-	if (!DAMAGE_IS_ALL(priv->gpu_damage))
-		sna_damage_add(&priv->gpu_damage, dstRegion);
-
 	return true;
 }
 
@@ -1614,9 +1618,7 @@ gen5_composite_set_target(struct sna *sna,
 	} else
 		sna_render_picture_extents(dst, &box);
 
-	hint = PREFER_GPU | RENDER_GPU;
-	if (!need_tiling(sna, op->dst.width, op->dst.height))
-		hint |= FORCE_GPU;
+	hint = PREFER_GPU | FORCE_GPU | RENDER_GPU;
 	if (!partial) {
 		hint |= IGNORE_DAMAGE;
 		if (w == op->dst.width && h == op->dst.height)
@@ -2732,19 +2734,6 @@ gen5_render_fill_boxes(struct sna *sna,
 	tmp.dst.format = format;
 	tmp.dst.bo = dst_bo;
 
-	if (too_large(dst->width, dst->height)) {
-		BoxRec extents;
-
-		boxes_extents(box, n, &extents);
-		if (!sna_render_composite_redirect(sna, &tmp,
-						   extents.x1, extents.y1,
-						   extents.x2 - extents.x1,
-						   extents.y2 - extents.y1,
-						   n > 1))
-			return sna_tiling_fill_boxes(sna, op, format, color,
-						     dst, dst_bo, box, n);
-	}
-
 	tmp.src.bo = sna_render_get_solid(sna, pixel);
 	tmp.src.filter = SAMPLER_FILTER_NEAREST;
 	tmp.src.repeat = SAMPLER_EXTEND_REPEAT;
@@ -2791,7 +2780,6 @@ gen5_render_fill_boxes(struct sna *sna,
 
 	gen4_vertex_flush(sna);
 	kgem_bo_destroy(&sna->kgem, tmp.src.bo);
-	sna_render_composite_redirect_done(sna, &tmp);
 	return true;
 }
 

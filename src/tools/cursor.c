@@ -61,22 +61,6 @@ int main(int argc, char **argv)
 	       cur->width, cur->height,
 	       cur->xhot, cur->yhot);
 
-	if (1) {
-		int x, y;
-
-		src = cur->pixels;
-		for (y = 0; y < cur->height; y++) {
-			for (x = 0; x < cur->width; x++) {
-				if (x == cur->xhot && y == cur->yhot)
-					printf("+");
-				else
-					printf("%c", *src ? *src >> 24 >= 127 ? 'x' : '.' : ' ');
-				src++;
-			}
-			printf("\n");
-		}
-	}
-
 	file = fopen("cursor.png", "wb");
 	if (file == NULL)
 		return 2;
@@ -94,9 +78,6 @@ int main(int argc, char **argv)
 
 	src = cur->pixels;
 	rows = malloc(cur->height*sizeof(png_byte*));
-	if (rows == NULL)
-		return 3;
-
 	for (y = 0; y < cur->height; y++) {
 		rows[y] = malloc(cur->width * 4);
 		for (x = 0; x < cur->width; x++) {
