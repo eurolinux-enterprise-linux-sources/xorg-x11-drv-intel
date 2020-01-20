@@ -61,6 +61,15 @@ static const XvImageRec gen3_Images[] = {
 	XVMC_YUV,
 };
 
+static const XvImageRec gen4_Images[] = {
+	XVIMAGE_YUY2,
+	XVIMAGE_YV12,
+	XVIMAGE_I420,
+	XVIMAGE_NV12,
+	XVIMAGE_UYVY,
+	XVMC_YUV,
+};
+
 static int sna_video_textured_stop(ddStopVideo_ARGS)
 {
 	struct sna_video *video = port->devPriv.ptr;
@@ -298,6 +307,20 @@ sna_video_textured_query(ddQueryImageAttributes_ARGS)
 			offsets[2] = size;
 		size += tmp;
 		break;
+	case FOURCC_NV12:
+		*h = (*h + 1) & ~1;
+		size = (*w + 3) & ~3;
+		if (pitches)
+			pitches[0] = size;
+		size *= *h;
+		if (offsets)
+			offsets[1] = size;
+		tmp = (*w + 3) & ~3;
+		if (pitches)
+			pitches[1] = tmp;
+		tmp *= (*h >> 1);
+		size += tmp;
+		break;
 	case FOURCC_UYVY:
 	case FOURCC_YUY2:
 	default:
@@ -374,9 +397,12 @@ void sna_video_textured_setup(struct sna *sna, ScreenPtr screen)
 	if (sna->kgem.gen < 030) {
 		adaptor->nImages = ARRAY_SIZE(gen2_Images);
 		adaptor->pImages = (XvImageRec *)gen2_Images;
-	} else {
+	} else if (sna->kgem.gen < 040) {
 		adaptor->nImages = ARRAY_SIZE(gen3_Images);
 		adaptor->pImages = (XvImageRec *)gen3_Images;
+	} else {
+		adaptor->nImages = ARRAY_SIZE(gen4_Images);
+		adaptor->pImages = (XvImageRec *)gen4_Images;
 	}
 #if XORG_XV_VERSION < 2
 	adaptor->ddAllocatePort = sna_xv_alloc_port;

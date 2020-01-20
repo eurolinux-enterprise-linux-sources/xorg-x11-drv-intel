@@ -115,6 +115,14 @@ static const uint32_t ps_kernel_planar_static[][4] = {
 #include "exa_wm_write.g4b"
 };
 
+static const uint32_t ps_kernel_nv12_static[][4] = {
+#include "exa_wm_xy.g4b"
+#include "exa_wm_src_affine.g4b"
+#include "exa_wm_src_sample_nv12.g4b"
+#include "exa_wm_yuv_rgb.g4b"
+#include "exa_wm_write.g4b"
+};
+
 #define NOKERNEL(kernel_enum, func, masked) \
     [kernel_enum] = {func, 0, masked}
 #define KERNEL(kernel_enum, kernel, masked) \
@@ -140,6 +148,7 @@ static const struct wm_kernel_info {
 	NOKERNEL(WM_KERNEL_OPACITY_P, brw_wm_kernel__projective_opacity, true),
 
 	KERNEL(WM_KERNEL_VIDEO_PLANAR, ps_kernel_planar_static, false),
+	KERNEL(WM_KERNEL_VIDEO_NV12, ps_kernel_nv12_static, false),
 	KERNEL(WM_KERNEL_VIDEO_PACKED, ps_kernel_packed_static, false),
 };
 #undef KERNEL
@@ -296,7 +305,7 @@ static uint32_t gen4_get_card_format(PictFormat format)
 		return GEN4_SURFACEFORMAT_R8G8B8A8_UNORM;
 	case PICT_x8b8g8r8:
 		return GEN4_SURFACEFORMAT_R8G8B8X8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 		return GEN4_SURFACEFORMAT_B10G10R10A2_UNORM;
 	case PICT_x2r10g10b10:
@@ -326,7 +335,7 @@ static uint32_t gen4_get_dest_format(PictFormat format)
 	case PICT_a8b8g8r8:
 	case PICT_x8b8g8r8:
 		return GEN4_SURFACEFORMAT_R8G8B8A8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 	case PICT_x2r10g10b10:
 		return GEN4_SURFACEFORMAT_B10G10R10A2_UNORM;
@@ -1324,7 +1333,7 @@ static void gen4_video_bind_surfaces(struct sna *sna,
 				     const struct sna_composite_op *op)
 {
 	struct sna_video_frame *frame = op->priv;
-	uint32_t src_surf_format;
+	uint32_t src_surf_format[6];
 	uint32_t src_surf_base[6];
 	int src_width[6];
 	int src_height[6];
@@ -1341,22 +1350,27 @@ static void gen4_video_bind_surfaces(struct sna *sna,
 	src_surf_base[5] = frame->UBufOffset;
 
 	if (is_planar_fourcc(frame->id)) {
-		src_surf_format = GEN4_SURFACEFORMAT_R8_UNORM;
-		src_width[1]  = src_width[0]  = frame->width;
-		src_height[1] = src_height[0] = frame->height;
-		src_pitch[1]  = src_pitch[0]  = frame->pitch[1];
-		src_width[4]  = src_width[5]  = src_width[2]  = src_width[3] =
-			frame->width / 2;
-		src_height[4] = src_height[5] = src_height[2] = src_height[3] =
-			frame->height / 2;
-		src_pitch[4]  = src_pitch[5]  = src_pitch[2]  = src_pitch[3] =
-			frame->pitch[0];
+		for (n = 0; n < 2; n++) {
+			src_surf_format[n] = GEN4_SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width;
+			src_height[n] = frame->height;
+			src_pitch[n]  = frame->pitch[1];
+		}
+		for (; n < 6; n++) {
+			if (is_nv12_fourcc(frame->id))
+				src_surf_format[n] = GEN4_SURFACEFORMAT_R8G8_UNORM;
+			else
+				src_surf_format[n] = GEN4_SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width / 2;
+			src_height[n] = frame->height / 2;
+			src_pitch[n]  = frame->pitch[0];
+		}
 		n_src = 6;
 	} else {
 		if (frame->id == FOURCC_UYVY)
-			src_surf_format = GEN4_SURFACEFORMAT_YCRCB_SWAPY;
+			src_surf_format[0] = GEN4_SURFACEFORMAT_YCRCB_SWAPY;
 		else
-			src_surf_format = GEN4_SURFACEFORMAT_YCRCB_NORMAL;
+			src_surf_format[0] = GEN4_SURFACEFORMAT_YCRCB_NORMAL;
 
 		src_width[0]  = frame->width;
 		src_height[0] = frame->height;
@@ -1381,7 +1395,7 @@ static void gen4_video_bind_surfaces(struct sna *sna,
 					       src_width[n],
 					       src_height[n],
 					       src_pitch[n],
-					       src_surf_format);
+					       src_surf_format[n]);
 	}
 
 	if (!ALWAYS_FLUSH && sna->kgem.batch[sna->render_state.gen4.surface_table] == binding_table[0])
@@ -1429,6 +1443,7 @@ gen4_render_video(struct sna *sna,
 	tmp.src.bo = frame->bo;
 	tmp.mask.bo = NULL;
 	tmp.u.gen4.wm_kernel =
+		is_nv12_fourcc(frame->id) ? WM_KERNEL_VIDEO_NV12 :
 		is_planar_fourcc(frame->id) ? WM_KERNEL_VIDEO_PLANAR : WM_KERNEL_VIDEO_PACKED;
 	tmp.u.gen4.ve_id = 2;
 	tmp.is_affine = true;

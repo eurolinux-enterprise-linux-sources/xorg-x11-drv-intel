@@ -56,6 +56,15 @@ static force_inline void batch_emit(struct sna *sna, uint32_t dword)
 	sna->kgem.batch[sna->kgem.nbatch++] = dword;
 }
 
+static force_inline void batch_emit_aligned(struct sna *sna, uint32_t dword, unsigned align)
+{
+	assert(sna->kgem.mode != KGEM_NONE);
+	assert(sna->kgem.nbatch + KGEM_BATCH_RESERVED < sna->kgem.surface);
+	while (sna->kgem.nbatch & (align-1))
+		sna->kgem.batch[sna->kgem.nbatch++] = 0;
+	sna->kgem.batch[sna->kgem.nbatch++] = dword;
+}
+
 static force_inline void batch_emit64(struct sna *sna, uint64_t qword)
 {
 	assert(sna->kgem.mode != KGEM_NONE);

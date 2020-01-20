@@ -48,6 +48,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
+#include <errno.h>
 
 #include <xorg-server.h>
 #include <xf86.h>
@@ -128,6 +129,11 @@ int backlight_get(struct backlight *b)
 	return param.curval;
 }
 
+char *backlight_find_for_device(struct pci_device *pci)
+{
+	return NULL;
+}
+
 int backlight_open(struct backlight *b, char *iface)
 {
 	struct wsdisplay_param param;
@@ -166,6 +172,7 @@ int backlight_off(struct backlight *b)
 {
 	return 0;
 }
+
 #else
 
 static int
@@ -216,6 +223,24 @@ __backlight_read(const char *iface, const char *file)
 }
 
 static int
+writen(int fd, const char *value, int len)
+{
+	int ret;
+
+	do {
+		ret = write(fd, value, len);
+		if (ret < 0) {
+			if (errno == EAGAIN || errno == EINTR)
+				continue;
+
+			return ret;
+		}
+	} while (value += ret, len -= ret);
+
+	return 0;
+}
+
+static int
 __backlight_write(const char *iface, const char *file, const char *value)
 {
 	int fd, ret;
@@ -224,7 +249,7 @@ __backlight_write(const char *iface, const char *file, const char *value)
 	if (fd < 0)
 		return -1;
 
-	ret = write(fd, value, strlen(value)+1);
+	ret = writen(fd, value, strlen(value)+1);
 	close(fd);
 
 	return ret;
@@ -422,6 +447,46 @@ __backlight_find(void)
 	return best_iface;
 }
 
+char *backlight_find_for_device(struct pci_device *pci)
+{
+	char path[200];
+	unsigned best_type = INT_MAX;
+	char *best_iface = NULL;
+	DIR *dir;
+	struct dirent *de;
+
+	snprintf(path, sizeof(path),
+		 "/sys/bus/pci/devices/%04x:%02x:%02x.%d/backlight",
+		 pci->domain, pci->bus, pci->dev, pci->func);
+
+	dir = opendir(path);
+	if (dir == NULL)
+		return NULL;
+
+	while ((de = readdir(dir))) {
+		int v;
+
+		if (*de->d_name == '.')
+			continue;
+
+		v = __backlight_exists(de->d_name);
+		if (v < 0)
+			continue;
+
+		if (v < best_type) {
+			char *copy = strdup(de->d_name);
+			if (copy) {
+				free(best_iface);
+				best_iface = copy;
+				best_type = v;
+			}
+		}
+	}
+	closedir(dir);
+
+	return best_iface;
+}
+
 int backlight_open(struct backlight *b, char *iface)
 {
 	int level, type;
@@ -458,7 +523,7 @@ err:
 int backlight_set(struct backlight *b, int level)
 {
 	char val[BACKLIGHT_VALUE_LEN];
-	int len, ret = 0;
+	int len;
 
 	if (b->iface == NULL)
 		return 0;
@@ -467,10 +532,7 @@ int backlight_set(struct backlight *b, int level)
 		level = b->max;
 
 	len = snprintf(val, BACKLIGHT_VALUE_LEN, "%d\n", level);
-	if (write(b->fd, val, len) != len)
-		ret = -1;
-
-	return ret;
+	return writen(b->fd, val, len);
 }
 
 int backlight_get(struct backlight *b)
@@ -530,44 +592,4 @@ void backlight_close(struct backlight *b)
 	backlight_disable(b);
 	if (b->pid > 0)
 		waitpid(b->pid, NULL, 0);
-}
-
-char *backlight_find_for_device(struct pci_device *pci)
-{
-	char path[200];
-	unsigned best_type = INT_MAX;
-	char *best_iface = NULL;
-	DIR *dir;
-	struct dirent *de;
-
-	snprintf(path, sizeof(path),
-		 "/sys/bus/pci/devices/%04x:%02x:%02x.%d/backlight",
-		 pci->domain, pci->bus, pci->dev, pci->func);
-
-	dir = opendir(path);
-	if (dir == NULL)
-		return NULL;
-
-	while ((de = readdir(dir))) {
-		int v;
-
-		if (*de->d_name == '.')
-			continue;
-
-		v = __backlight_exists(de->d_name);
-		if (v < 0)
-			continue;
-
-		if (v < best_type) {
-			char *copy = strdup(de->d_name);
-			if (copy) {
-				free(best_iface);
-				best_iface = copy;
-				best_type = v;
-			}
-		}
-	}
-	closedir(dir);
-
-	return best_iface;
 }

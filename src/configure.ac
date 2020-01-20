@@ -247,32 +247,6 @@ if test "x$ac_cv_header_X11_extensions_shmproto_h" != "xyes" -a "x$ac_cv_header_
 fi
 
 if test "x$shm" = "xyes"; then
-	AC_MSG_CHECKING(whether shmctl IPC_RMID allows subsequent attaches)
-	AC_TRY_RUN([
-		  #include <sys/types.h>
-		  #include <sys/ipc.h>
-		  #include <sys/shm.h>
-		  int main()
-		  {
-		      char *shmaddr;
-		      int id = shmget (IPC_PRIVATE, 4, IPC_CREAT | 0600);
-		      if (id == -1) return 2;
-		      shmaddr = shmat (id, 0, 0);
-		      shmctl (id, IPC_RMID, 0);
-		      if ((char*) shmat (id, 0, 0) == (char*) -1) {
-			  shmdt (shmaddr);
-			  return 1;
-		      }
-		      shmdt (shmaddr);
-		      shmdt (shmaddr);
-		      return 0;
-		  }
-		  ],
-		  AC_DEFINE(IPC_RMID_DEFERRED_RELEASE, 1,
-			    [Define to 1 if shared memory segments are released deferred.])
-		  AC_MSG_RESULT(yes),
-		  AC_MSG_RESULT(no),
-		  AC_MSG_RESULT(assuming no))
 	AC_DEFINE([HAVE_MIT_SHM], 1, [Define to 1 if MIT-SHM is available])
 fi
 
@@ -342,9 +316,9 @@ AC_ARG_ENABLE(dri,
 	      [DRI=auto])
 AC_ARG_ENABLE(dri1,
 	      AS_HELP_STRING([--disable-dri1],
-			     [Disable DRI1 support [[default=yes]]]),
+			     [Disable DRI1 support [[default=auto]]]),
 	      [DRI1=$enableval],
-	      [DRI1=yes])
+	      [DRI1=auto])
 AC_ARG_ENABLE(dri2,
 	      AS_HELP_STRING([--disable-dri2],
 			     [Disable DRI2 support [[default=yes]]]),

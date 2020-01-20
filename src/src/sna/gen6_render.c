@@ -115,6 +115,13 @@ static const uint32_t ps_kernel_planar[][4] = {
 #include "exa_wm_write.g6b"
 };
 
+static const uint32_t ps_kernel_nv12[][4] = {
+#include "exa_wm_src_affine.g6b"
+#include "exa_wm_src_sample_nv12.g6b"
+#include "exa_wm_yuv_rgb.g6b"
+#include "exa_wm_write.g6b"
+};
+
 #define NOKERNEL(kernel_enum, func, ns) \
     [GEN6_WM_KERNEL_##kernel_enum] = {#kernel_enum, func, 0, ns}
 #define KERNEL(kernel_enum, kernel, ns) \
@@ -142,6 +149,7 @@ static const struct wm_kernel_info {
 	NOKERNEL(OPACITY_P, brw_wm_kernel__projective_opacity, 2),
 
 	KERNEL(VIDEO_PLANAR, ps_kernel_planar, 7),
+	KERNEL(VIDEO_NV12, ps_kernel_nv12, 7),
 	KERNEL(VIDEO_PACKED, ps_kernel_packed, 2),
 };
 #undef KERNEL
@@ -261,7 +269,7 @@ static uint32_t gen6_get_card_format(PictFormat format)
 		return GEN6_SURFACEFORMAT_R8G8B8A8_UNORM;
 	case PICT_x8b8g8r8:
 		return GEN6_SURFACEFORMAT_R8G8B8X8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 		return GEN6_SURFACEFORMAT_B10G10R10A2_UNORM;
 	case PICT_x2r10g10b10:
@@ -291,7 +299,7 @@ static uint32_t gen6_get_dest_format(PictFormat format)
 	case PICT_a8b8g8r8:
 	case PICT_x8b8g8r8:
 		return GEN6_SURFACEFORMAT_R8G8B8A8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 	case PICT_x2r10g10b10:
 		return GEN6_SURFACEFORMAT_B10G10R10A2_UNORM;
@@ -1554,7 +1562,7 @@ static void gen6_emit_video_state(struct sna *sna,
 				  const struct sna_composite_op *op)
 {
 	struct sna_video_frame *frame = op->priv;
-	uint32_t src_surf_format;
+	uint32_t src_surf_format[6];
 	uint32_t src_surf_base[6];
 	int src_width[6];
 	int src_height[6];
@@ -1574,22 +1582,27 @@ static void gen6_emit_video_state(struct sna *sna,
 	src_surf_base[5] = frame->UBufOffset;
 
 	if (is_planar_fourcc(frame->id)) {
-		src_surf_format = GEN6_SURFACEFORMAT_R8_UNORM;
-		src_width[1]  = src_width[0]  = frame->width;
-		src_height[1] = src_height[0] = frame->height;
-		src_pitch[1]  = src_pitch[0]  = frame->pitch[1];
-		src_width[4]  = src_width[5]  = src_width[2]  = src_width[3] =
-			frame->width / 2;
-		src_height[4] = src_height[5] = src_height[2] = src_height[3] =
-			frame->height / 2;
-		src_pitch[4]  = src_pitch[5]  = src_pitch[2]  = src_pitch[3] =
-			frame->pitch[0];
+		for (n = 0; n < 2; n++) {
+			src_surf_format[n] = GEN6_SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width;
+			src_height[n] = frame->height;
+			src_pitch[n]  = frame->pitch[1];
+		}
+		for (; n < 6; n++) {
+			if (is_nv12_fourcc(frame->id))
+				src_surf_format[n] = GEN6_SURFACEFORMAT_R8G8_UNORM;
+			else
+				src_surf_format[n] = GEN6_SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width / 2;
+			src_height[n] = frame->height / 2;
+			src_pitch[n]  = frame->pitch[0];
+		}
 		n_src = 6;
 	} else {
 		if (frame->id == FOURCC_UYVY)
-			src_surf_format = GEN6_SURFACEFORMAT_YCRCB_SWAPY;
+			src_surf_format[0] = GEN6_SURFACEFORMAT_YCRCB_SWAPY;
 		else
-			src_surf_format = GEN6_SURFACEFORMAT_YCRCB_NORMAL;
+			src_surf_format[0] = GEN6_SURFACEFORMAT_YCRCB_NORMAL;
 
 		src_width[0]  = frame->width;
 		src_height[0] = frame->height;
@@ -1612,7 +1625,7 @@ static void gen6_emit_video_state(struct sna *sna,
 					       src_width[n],
 					       src_height[n],
 					       src_pitch[n],
-					       src_surf_format);
+					       src_surf_format[n]);
 	}
 
 	gen6_emit_state(sna, op, offset | dirty);
@@ -1670,6 +1683,8 @@ gen6_render_video(struct sna *sna,
 		GEN6_SET_FLAGS(SAMPLER_OFFSET(filter, SAMPLER_EXTEND_PAD,
 					       SAMPLER_FILTER_NEAREST, SAMPLER_EXTEND_NONE),
 			       NO_BLEND,
+			       is_nv12_fourcc(frame->id) ?
+			       GEN6_WM_KERNEL_VIDEO_NV12 :
 			       is_planar_fourcc(frame->id) ?
 			       GEN6_WM_KERNEL_VIDEO_PLANAR :
 			       GEN6_WM_KERNEL_VIDEO_PACKED,

@@ -233,7 +233,7 @@ static int load_i915_kernel_module(void)
 	const char **kn;
 
 	for (kn = kernel_module_names; *kn; kn++)
-		if (xf86LoadKernelModule(*kn) == 0)
+		if (xf86LoadKernelModule(*kn))
 			return 0;
 
 	return -1;
@@ -467,7 +467,7 @@ static char *find_master_node(int fd)
 
 	sprintf(buf, "/dev/dri/card%d", (int)(st.st_rdev & 0x7f));
 	if (stat(buf, &master) == 0 &&
-	    st.st_mode == master.st_mode &&
+	    S_ISCHR(master.st_mode) &&
 	    (st.st_rdev & 0x7f) == master.st_rdev)
 		return strdup(buf);
 
@@ -478,10 +478,10 @@ static char *find_master_node(int fd)
 static int is_render_node(int fd, struct stat *st)
 {
 	if (fstat(fd, st))
-		return 0;
+		return -1;
 
 	if (!S_ISCHR(st->st_mode))
-		return 0;
+		return -1;
 
 	return st->st_rdev & 0x80;
 }
@@ -498,7 +498,7 @@ static char *find_render_node(int fd)
 
 	sprintf(buf, "/dev/dri/renderD%d", (int)((master.st_rdev | 0x80) & 0xbf));
 	if (stat(buf, &render) == 0 &&
-	    master.st_mode == render.st_mode &&
+	    S_ISCHR(render.st_mode) &&
 	    render.st_rdev == (master.st_rdev | 0x80))
 		return strdup(buf);
 
@@ -506,7 +506,7 @@ static char *find_render_node(int fd)
 	for (i = 0; i < 16; i++) {
 		sprintf(buf, "/dev/dri/renderD%d", i + 128);
 		if (stat(buf, &render) == 0 &&
-		    master.st_mode == render.st_mode &&
+		    S_ISCHR(render.st_mode) &&
 		    render.st_rdev == (master.st_rdev | 0x80))
 			return strdup(buf);
 	}

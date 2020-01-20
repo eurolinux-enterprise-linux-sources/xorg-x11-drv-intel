@@ -134,6 +134,14 @@ static const struct intel_device_info intel_kabylake_info = {
 	.gen = 0112,
 };
 
+static const struct intel_device_info intel_geminilake_info = {
+	.gen = 0113,
+};
+
+static const struct intel_device_info intel_coffeelake_info = {
+	.gen = 0114,
+};
+
 static const SymTabRec intel_chipsets[] = {
 	{PCI_CHIP_I810,				"i810"},
 	{PCI_CHIP_I810_DC100,			"i810-dc100"},
@@ -272,6 +280,46 @@ static const SymTabRec intel_chipsets[] = {
 	{0x22b2, "HD Graphics"},
 	{0x22b3, "HD Graphics"},
 
+	/* Skylake */
+	{0x1902, "HD Graphics 510"},
+	{0x1906, "HD Graphics 510"},
+	{0x190B, "HD Graphics 510"},
+	{0x1912, "HD Graphics 530"},
+	{0x1916, "HD Graphics 520"},
+	{0x191B, "HD Graphics 530"},
+	{0x191D, "HD Graphics P530"},
+	{0x191E, "HD Graphics 515"},
+	{0x1921, "HD Graphics 520"},
+	{0x1926, "Iris Graphics 540"},
+	{0x1927, "Iris Graphics 550"},
+	{0x192B, "Iris Graphics 555"},
+	{0x192D, "Iris Graphics P555"},
+	{0x1932, "Iris Pro Graphics 580"},
+	{0x193A, "Iris Pro Graphics P580"},
+	{0x193B, "Iris Pro Graphics 580"},
+	{0x193D, "Iris Pro Graphics P580"},
+
+	/* Broxton (Apollolake) */
+	{0x5A84, "HD Graphics 505"},
+	{0x5A85, "HD Graphics 500"},
+
+	/* Kabylake */
+	{0x5916, "HD Graphics 620"},
+	{0x591E, "HD Graphics 615"},
+
+	/*Coffeelake*/
+	{0x3E90, "HD Graphics"},
+	{0x3E93, "HD Graphics"},
+	{0x3E91, "HD Graphics"},
+	{0x3E92, "HD Graphics"},
+	{0x3E96, "HD Graphics"},
+	{0x3E9B, "HD Graphics"},
+	{0x3E94, "HD Graphics"},
+	{0x3EA5, "HD Graphics"},
+	{0x3EA6, "HD Graphics"},
+	{0x3EA7, "HD Graphics"},
+	{0x3EA8, "HD Graphics"},
+
 	/* When adding new identifiers, also update:
 	 * 1. intel_identify()
 	 * 2. man/intel.man
@@ -318,22 +366,18 @@ static const struct pci_id_match intel_device_match[] = {
 	INTEL_IVB_D_IDS(&intel_ivybridge_info),
 	INTEL_IVB_M_IDS(&intel_ivybridge_info),
 
-	INTEL_HSW_D_IDS(&intel_haswell_info),
-	INTEL_HSW_M_IDS(&intel_haswell_info),
-
-	INTEL_VLV_D_IDS(&intel_valleyview_info),
-	INTEL_VLV_M_IDS(&intel_valleyview_info),
-
-	INTEL_BDW_D_IDS(&intel_broadwell_info),
-	INTEL_BDW_M_IDS(&intel_broadwell_info),
-
+	INTEL_HSW_IDS(&intel_haswell_info),
+	INTEL_VLV_IDS(&intel_valleyview_info),
+	INTEL_BDW_IDS(&intel_broadwell_info),
 	INTEL_CHV_IDS(&intel_cherryview_info),
-
 	INTEL_SKL_IDS(&intel_skylake_info),
-
 	INTEL_BXT_IDS(&intel_broxton_info),
-
 	INTEL_KBL_IDS(&intel_kabylake_info),
+	INTEL_GLK_IDS(&intel_geminilake_info),
+
+	INTEL_CFL_S_IDS(&intel_coffeelake_info),
+	INTEL_CFL_H_IDS(&intel_coffeelake_info),
+	INTEL_CFL_U_IDS(&intel_coffeelake_info),
 
 	INTEL_VGA_DEVICE(PCI_MATCH_ANY, &intel_generic_info),
 #endif
@@ -465,9 +509,9 @@ static void intel_identify(int flags)
 	if (unique != stack)
 		free(unique);
 
-	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) HD Graphics: 2000-6000\n");
-	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) Iris(TM) Graphics: 5100, 6100\n");
-	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) Iris(TM) Pro Graphics: 5200, 6200, P6300\n");
+	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) HD Graphics\n");
+	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) Iris(TM) Graphics\n");
+	xf86Msg(X_INFO, INTEL_NAME ": Driver for Intel(R) Iris(TM) Pro Graphics\n");
 }
 
 static Bool intel_driver_func(ScrnInfoPtr pScrn,

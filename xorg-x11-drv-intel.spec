@@ -1,16 +1,13 @@
 %define moduledir %(pkg-config xorg-server --variable=moduledir )
 %define driverdir	%{moduledir}/drivers
 %define gputoolsver 1.9
-%define gitdate 20160929
+%define gitdate 20180530
 %define gitrev .%{gitdate}
 
 %undefine _hardened_build
 
 %if 0%{?rhel} == 7
 %define rhel7 1
-%endif
-%if 0%{?rhel} == 6
-%define rhel6 1
 %endif
 
 %if 0%{?rhel7} || 0%{?fedora} > 17
@@ -19,16 +16,12 @@
 
 %if 0%{?rhel7} || 0%{?fedora} > 20
 %define kmsonly 1
-%else
-%ifnarch %{ix86}
-%define kmsonly 1
-%endif
 %endif
 
 Summary:   Xorg X11 Intel video driver
 Name:      xorg-x11-drv-intel
 Version:   2.99.917
-Release:   27%{?gitrev}%{?dist}
+Release:   28%{?gitrev}%{?dist}
 URL:       http://www.x.org
 License:   MIT
 Group:     User Interface/X Hardware Support
@@ -120,7 +113,8 @@ popd
 
 %build
 autoreconf -f -i -v
-%configure %{?kmsonly:--enable-kms-only} --with-default-dri=3 --enable-tools
+%configure %{?kmsonly:--enable-kms-only} --with-default-dri=3 --enable-tools || \
+    (cat config.log ; exit 1)
 make %{?_smp_mflags} V=1
 
 pushd ../intel-gpu-tools-%{gputoolsver}
@@ -181,6 +175,12 @@ rm -f $RPM_BUILD_ROOT%{_libdir}/libI*XvMC.so
 %{_mandir}/man1/intel_*.1*
 
 %changelog
+* Wed May 30 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-28
+- Today's git snapshot (commit 35947721)
+
+* Wed May 30 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-27.20160929.1
+- Rebuild for xserver 1.20
+
 * Fri Jan 12 2018 Adam Jackson <ajax@redhat.com> - 2.99.917-27
 - Re-enable skylake support, as we're now defaulting to modesetting in the
   server.

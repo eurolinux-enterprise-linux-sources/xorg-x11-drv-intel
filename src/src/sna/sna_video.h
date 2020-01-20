@@ -38,6 +38,7 @@ THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 #define FOURCC_XVMC (('C' << 24) + ('M' << 16) + ('V' << 8) + 'X')
 #define FOURCC_RGB565 ((16 << 24) + ('B' << 16) + ('G' << 8) + 'R')
 #define FOURCC_RGB888 ((24 << 24) + ('B' << 16) + ('G' << 8) + 'R')
+#define FOURCC_NV12 (('2' << 24) + ('1' << 16) + ('V' << 8) + 'N')
 
 /*
  * Below, a dummy picture type that is used in XvPutImage
@@ -69,6 +70,15 @@ THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 	XvTopToBottom \
 }
 
+/* no standard define for this */
+#define XVIMAGE_NV12 { \
+	FOURCC_NV12, XvYUV, LSBFirst,				\
+	{'N','V','1','2', 0x00,0x00,0x00,0x10,0x80,0x00,0x00,0xAA,0x00,0x38,0x9B,0x71}, \
+	12, XvPlanar, 2, 0, 0, 0, 0, 8, 8, 8, 1, 2, 2, 1, 2, 2, \
+	{'Y','U','V', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}, \
+	XvTopToBottom \
+}
+
 struct sna_video {
 	struct sna *sna;
 
@@ -90,6 +100,9 @@ struct sna_video {
 	unsigned color_key_changed;
 	bool has_color_key;
 
+	unsigned colorspace;
+	unsigned colorspace_changed;
+
 	/** YUV data buffers */
 	struct kgem_bo *old_buf[2];
 	struct kgem_bo *buf;
@@ -98,7 +111,6 @@ struct sna_video {
 	int alignment;
 	bool tiled;
 	bool textured;
-	int plane;
 
 	struct kgem_bo *bo[4];
 	RegionRec clip;
@@ -160,6 +172,17 @@ static inline int is_planar_fourcc(int id)
 	case FOURCC_YV12:
 	case FOURCC_I420:
 	case FOURCC_XVMC:
+	case FOURCC_NV12:
+		return 1;
+	default:
+		return 0;
+	}
+}
+
+static inline int is_nv12_fourcc(int id)
+{
+	switch (id) {
+	case FOURCC_NV12:
 		return 1;
 	default:
 		return 0;

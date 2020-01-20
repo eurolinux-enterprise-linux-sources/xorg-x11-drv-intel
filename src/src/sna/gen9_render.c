@@ -108,6 +108,13 @@ static const uint32_t ps_kernel_planar[][4] = {
 #include "exa_wm_write.g8b"
 };
 
+static const uint32_t ps_kernel_nv12[][4] = {
+#include "exa_wm_src_affine.g8b"
+#include "exa_wm_src_sample_nv12.g8b"
+#include "exa_wm_yuv_rgb.g8b"
+#include "exa_wm_write.g8b"
+};
+
 static const uint32_t ps_kernel_rgb[][4] = {
 #include "exa_wm_src_affine.g8b"
 #include "exa_wm_src_sample_argb.g8b"
@@ -144,6 +151,7 @@ static const struct wm_kernel_info {
 
 #if !NO_VIDEO
 	KERNEL(VIDEO_PLANAR, ps_kernel_planar, 7),
+	KERNEL(VIDEO_NV12, ps_kernel_nv12, 7),
 	KERNEL(VIDEO_PACKED, ps_kernel_packed, 2),
 	KERNEL(VIDEO_RGB, ps_kernel_rgb, 2),
 #endif
@@ -240,6 +248,16 @@ static const struct gt_info kbl_gt_info = {
 	.urb = { .max_vs_entries = 960 },
 };
 
+static const struct gt_info glk_gt_info = {
+	.name = "Geminilake (gen9)",
+	.urb = { .max_vs_entries = 320 },
+};
+
+static const struct gt_info cfl_gt_info = {
+	.name = "Coffeelake (gen9)",
+	.urb = { .max_vs_entries = 960 },
+};
+
 static bool is_skl(struct sna *sna)
 {
 	return sna->kgem.gen == 0110;
@@ -255,6 +273,15 @@ static bool is_kbl(struct sna *sna)
 	return sna->kgem.gen == 0112;
 }
 
+static bool is_glk(struct sna *sna)
+{
+	return sna->kgem.gen == 0113;
+}
+
+static bool is_cfl(struct sna *sna)
+{
+	return sna->kgem.gen == 0114;
+}
 
 static inline bool too_large(int width, int height)
 {
@@ -347,7 +374,7 @@ static uint32_t gen9_get_card_format(PictFormat format)
 		return SURFACEFORMAT_R8G8B8A8_UNORM;
 	case PICT_x8b8g8r8:
 		return SURFACEFORMAT_R8G8B8X8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 		return SURFACEFORMAT_B10G10R10A2_UNORM;
 	case PICT_x2r10g10b10:
@@ -377,7 +404,7 @@ static uint32_t gen9_get_dest_format(PictFormat format)
 	case PICT_a8b8g8r8:
 	case PICT_x8b8g8r8:
 		return SURFACEFORMAT_R8G8B8A8_UNORM;
-#ifdef PICT_a2r10g10b10
+#if XORG_VERSION_CURRENT >= XORG_VERSION_NUMERIC(1,6,99,900,0)
 	case PICT_a2r10g10b10:
 	case PICT_x2r10g10b10:
 		return SURFACEFORMAT_B10G10R10A2_UNORM;
@@ -1101,6 +1128,17 @@ gen9_emit_vertex_elements(struct sna *sna,
 		return;
 	render->ve_id = id;
 
+	if (render->ve_dirty) {
+		/* dummy primitive to flush vertex before change? */
+		OUT_BATCH(GEN9_3DPRIMITIVE | (7 - 2));
+		OUT_BATCH(0); /* ignored, see VF_TOPOLOGY */
+		OUT_BATCH(0);
+		OUT_BATCH(0);
+		OUT_BATCH(1);	/* single instance */
+		OUT_BATCH(0);	/* start instance location */
+		OUT_BATCH(0);	/* index buffer offset, ignored */
+	}
+
 	/* The VUE layout
 	 *    dword 0-3: pad (0.0, 0.0, 0.0. 0.0)
 	 *    dword 4-7: position (x, y, 1.0, 1.0),
@@ -1198,6 +1236,8 @@ gen9_emit_vertex_elements(struct sna *sna,
 			  offset << VE_OFFSET_SHIFT);
 		OUT_BATCH(dw);
 	}
+
+	render->ve_dirty = true;
 }
 
 inline static void
@@ -1322,6 +1362,7 @@ static bool gen9_magic_ca_pass(struct sna *sna,
 	OUT_BATCH(0);	/* index buffer offset, ignored */
 
 	state->last_primitive = sna->kgem.nbatch;
+	state->ve_dirty = false;
 	return true;
 }
 
@@ -1508,6 +1549,7 @@ static void gen9_emit_primitive(struct sna *sna)
 	sna->render.vertex_start = sna->render.vertex_index;
 
 	sna->render_state.gen9.last_primitive = sna->kgem.nbatch;
+	sna->render_state.gen9.ve_dirty = false;
 }
 
 static bool gen9_rectangle_begin(struct sna *sna,
@@ -3739,7 +3781,7 @@ static void gen9_emit_video_state(struct sna *sna,
 				  const struct sna_composite_op *op)
 {
 	struct sna_video_frame *frame = op->priv;
-	uint32_t src_surf_format;
+	uint32_t src_surf_format[6];
 	uint32_t src_surf_base[6];
 	int src_width[6];
 	int src_height[6];
@@ -3760,24 +3802,29 @@ static void gen9_emit_video_state(struct sna *sna,
 	src_surf_base[5] = frame->UBufOffset;
 
 	if (is_planar_fourcc(frame->id)) {
-		src_surf_format = SURFACEFORMAT_R8_UNORM;
-		src_width[1]  = src_width[0]  = frame->width;
-		src_height[1] = src_height[0] = frame->height;
-		src_pitch[1]  = src_pitch[0]  = frame->pitch[1];
-		src_width[4]  = src_width[5]  = src_width[2]  = src_width[3] =
-			frame->width / 2;
-		src_height[4] = src_height[5] = src_height[2] = src_height[3] =
-			frame->height / 2;
-		src_pitch[4]  = src_pitch[5]  = src_pitch[2]  = src_pitch[3] =
-			frame->pitch[0];
+		for (n = 0; n < 2; n++) {
+			src_surf_format[n] = SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width;
+			src_height[n] = frame->height;
+			src_pitch[n]  = frame->pitch[1];
+		}
+		for (; n < 6; n++) {
+			if (is_nv12_fourcc(frame->id))
+				src_surf_format[n] = SURFACEFORMAT_R8G8_UNORM;
+			else
+				src_surf_format[n] = SURFACEFORMAT_R8_UNORM;
+			src_width[n]  = frame->width / 2;
+			src_height[n] = frame->height / 2;
+			src_pitch[n]  = frame->pitch[0];
+		}
 		n_src = 6;
 	} else {
 		if (frame->id == FOURCC_RGB888)
-			src_surf_format = SURFACEFORMAT_B8G8R8X8_UNORM;
+			src_surf_format[0] = SURFACEFORMAT_B8G8R8X8_UNORM;
 		else if (frame->id == FOURCC_UYVY)
-			src_surf_format = SURFACEFORMAT_YCRCB_SWAPY;
+			src_surf_format[0] = SURFACEFORMAT_YCRCB_SWAPY;
 		else
-			src_surf_format = SURFACEFORMAT_YCRCB_NORMAL;
+			src_surf_format[0] = SURFACEFORMAT_YCRCB_NORMAL;
 
 		src_width[0]  = frame->width;
 		src_height[0] = frame->height;
@@ -3800,7 +3847,7 @@ static void gen9_emit_video_state(struct sna *sna,
 					       src_width[n],
 					       src_height[n],
 					       src_pitch[n],
-					       src_surf_format);
+					       src_surf_format[n]);
 	}
 
 	gen9_emit_state(sna, op, offset);
@@ -3813,6 +3860,9 @@ static unsigned select_video_kernel(const struct sna_video_frame *frame)
 	case FOURCC_I420:
 	case FOURCC_XVMC:
 		return GEN9_WM_KERNEL_VIDEO_PLANAR;
+
+	case FOURCC_NV12:
+		return GEN9_WM_KERNEL_VIDEO_NV12;
 
 	case FOURCC_RGB888:
 	case FOURCC_RGB565:
@@ -3967,6 +4017,7 @@ static void gen9_render_reset(struct sna *sna)
 	sna->render_state.gen9.emit_flush = false;
 	sna->render_state.gen9.needs_invariant = true;
 	sna->render_state.gen9.ve_id = 3 << 2;
+	sna->render_state.gen9.ve_dirty = false;
 	sna->render_state.gen9.last_primitive = -1;
 
 	sna->render_state.gen9.num_sf_outputs = 0;
@@ -4012,6 +4063,10 @@ static bool gen9_render_setup(struct sna *sna)
 		state->info = &bxt_gt_info;
 	if (is_kbl(sna))
 		state->info = &kbl_gt_info;
+	if (is_glk(sna))
+		state->info = &glk_gt_info;
+	if (is_cfl(sna))
+		state->info = &cfl_gt_info;
 
 	sna_static_stream_init(&general);
 
